@@ -1,0 +1,33 @@
+# Environment / secrets
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.Python
+build/
+dist/
+venv/
+.venv/
+env/
+
+# Data / databases (regenerable, contain fetched content and cost data)
+data/
+*.db
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+chroma_data/
+
+# Logs
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

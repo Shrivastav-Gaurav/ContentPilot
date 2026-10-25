@@ -1,0 +1,7 @@
+streamlit
+chromadb
+youtube-transcript-api
+yt-dlp==2026.10.21
+requests
+python-dotenv
+pydantic
