@@ -8,15 +8,29 @@ from contentpilot.fetchers.base import FetchBlockedError, FetchUnavailableError,
 
 _MIN_TEXT_LENGTH = 120
 
+# LinkedIn shows generic "Join now"/"Sign in" nav chrome on EVERY public post
+# page, authenticated or not — so a phrase like "join linkedin" appearing
+# anywhere is not evidence of a wall; real public posts with full content
+# routinely contain it (confirmed against live saved-post fetches). Only
+# phrases that specifically assert access is being denied (not just offered)
+# are safe markers regardless of page length.
 _LOGIN_WALL_MARKERS = [
-    "sign in to linkedin",
-    "join linkedin",
-    "join now to see",
-    "please log in",
-    "log in or sign up",
-    "you must log in",
     "authwall",
+    "you must log in",
+    "you must sign in",
+    "please log in to continue",
+    "please sign in to continue",
 ]
+
+# Weaker phrasing that often appears in nav chrome too, but genuinely
+# indicates a wall when the page is otherwise short — i.e. there's no real
+# content around it, just the wall itself.
+_WEAK_LOGIN_WALL_MARKERS = [
+    "sign in to linkedin",
+    "join now to see",
+    "log in or sign up",
+]
+_WEAK_MARKER_MAX_LENGTH = 2000
 
 _NOT_FOUND_MARKERS = [
     "page not found",
@@ -49,7 +63,11 @@ def canonicalize(url: str) -> str:
 
 def _looks_like_login_wall(text: str) -> bool:
     lowered = text.lower()
-    return any(marker in lowered for marker in _LOGIN_WALL_MARKERS)
+    if any(marker in lowered for marker in _LOGIN_WALL_MARKERS):
+        return True
+    if len(text) <= _WEAK_MARKER_MAX_LENGTH:
+        return any(marker in lowered for marker in _WEAK_LOGIN_WALL_MARKERS)
+    return False
 
 
 def _looks_like_not_found(text: str) -> bool:

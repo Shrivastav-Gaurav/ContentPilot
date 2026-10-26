@@ -19,6 +19,14 @@ WORKER_CONCURRENCY = 3
 WORKER_MAX_ATTEMPTS = 3
 WORKER_POLL_INTERVAL_SEC = 2
 
+LINKEDIN_SESSION_PATH = os.path.join(DATA_DIR, "linkedin-session.json")
+LINKEDIN_SAVED_POSTS_URL = "https://www.linkedin.com/my-items/saved-posts/"
+LINKEDIN_FEED_URL = "https://www.linkedin.com/feed/"
+
+DEFAULT_LINKEDIN_SCAN_WINDOW = "30d"
+DEFAULT_LINKEDIN_SCAN_ENABLED = False
+DEFAULT_LINKEDIN_SCAN_CRON = "30 17 * * 0"  # Sunday 23:00 IST = 17:30 UTC
+
 
 def openrouter_api_key() -> str:
     return os.environ[OPENROUTER_API_KEY_ENV]
@@ -30,3 +38,23 @@ def openrouter_model() -> str:
 
 def jina_api_key() -> str | None:
     return os.environ.get(JINA_API_KEY_ENV) or None
+
+
+def linkedin_credentials() -> tuple[str, str]:
+    email = os.environ.get("LINKEDIN_EMAIL", "").strip()
+    password = os.environ.get("LINKEDIN_PASSWORD", "").strip()
+    if not email or not password:
+        raise ValueError("LINKEDIN_EMAIL / LINKEDIN_PASSWORD not set in .env")
+    return email, password
+
+
+def linkedin_scan_window() -> str:
+    return os.environ.get("LINKEDIN_SCAN_WINDOW", DEFAULT_LINKEDIN_SCAN_WINDOW)
+
+
+def linkedin_scan_enabled() -> bool:
+    return os.environ.get("LINKEDIN_SCAN_ENABLED", "").strip().lower() in ("true", "1", "yes")
+
+
+def linkedin_scan_cron() -> str:
+    return os.environ.get("LINKEDIN_SCAN_CRON", DEFAULT_LINKEDIN_SCAN_CRON)

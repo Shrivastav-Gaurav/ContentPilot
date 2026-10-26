@@ -15,7 +15,7 @@ from contentpilot.extraction import ExtractionValidationError, extract_tpm_lens
 from contentpilot.fetchers.base import FetchBlockedError, FetchNoTranscriptError, FetchUnavailableError
 from contentpilot.fetchers.router import fetch as fetch_content
 from contentpilot.prompts import tpm_lens
-from contentpilot.storage import save_card, save_source
+from contentpilot.storage import create_ingest_job, mark_source_saved, save_card, save_source
 
 LENS = "tpm"
 
@@ -131,7 +131,7 @@ def _already_has_card(canonical_url: str) -> bool:
         conn.close()
 
 
-def _process_item(job_id: int, item: dict, cost_cap_usd: float) -> None:
+def _process_item(job_id: int, item: dict, cost_cap_usd: float, job_type: str) -> None:
     item_id = item["id"]
     url = item["source_url"]
 
@@ -153,10 +153,14 @@ def _process_item(job_id: int, item: dict, cost_cap_usd: float) -> None:
 
         if _already_has_card(raw.canonical_url):
             source_id = save_source(raw)
+            if job_type == "saved_scan":
+                mark_source_saved(source_id)
             _mark_item(item_id, status="skipped_duplicate")
             return
 
         source_id = save_source(raw)
+        if job_type == "saved_scan":
+            mark_source_saved(source_id)
         result = extract_tpm_lens(raw.text)
         card_id = save_card(source_id, LENS, result)
 
@@ -209,6 +213,7 @@ def _next_queued_items(job_id: int, limit: int) -> list[dict]:
 
 def _run_job(job: dict) -> None:
     job_id = job["id"]
+    job_type = job["job_type"]
     cost_cap_usd = job["cost_cap_usd"] or config.DEFAULT_COST_CAP_USD
     _mark_job_running(job_id)
 
@@ -225,7 +230,10 @@ def _run_job(job: dict) -> None:
             break
 
         with ThreadPoolExecutor(max_workers=config.WORKER_CONCURRENCY) as executor:
-            futures = [executor.submit(_process_item, job_id, item, cost_cap_usd) for item in batch]
+            futures = [
+                executor.submit(_process_item, job_id, item, cost_cap_usd, job_type)
+                for item in batch
+            ]
             for future in as_completed(futures):
                 future.result()
 
@@ -238,17 +246,59 @@ def _run_job(job: dict) -> None:
         _finalize_job(job_id, "done")
 
 
+def trigger_saved_scan(time_window: str | None = None) -> int:
+    """Scrapes LinkedIn saved posts and enqueues them as a saved_scan ingest job.
+
+    Runs the (headed) Playwright scrape synchronously before returning — the
+    caller (scheduler tick or a Streamlit button) blocks for the scrape, then
+    the worker's normal job loop handles extraction/storage for the URLs.
+    """
+    from contentpilot.scrapers.saved_posts import scrape_saved_post_urls
+
+    window = time_window or config.linkedin_scan_window()
+    urls = scrape_saved_post_urls(time_window=window)
+    job_id = create_ingest_job("saved_scan", "linkedin-saved-posts", urls, cost_cap_usd=config.DEFAULT_COST_CAP_USD)
+    print(f"[worker] saved_scan job {job_id} enqueued with {len(urls)} URL(s)")
+    return job_id
+
+
+def _start_scheduler():
+    if not config.linkedin_scan_enabled():
+        return None
+
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.cron import CronTrigger
+
+    scheduler = BackgroundScheduler(timezone="UTC")
+    cron = config.linkedin_scan_cron()
+    minute, hour, day, month, day_of_week = cron.split()
+    scheduler.add_job(
+        trigger_saved_scan,
+        CronTrigger(minute=minute, hour=hour, day=day, month=month, day_of_week=day_of_week),
+        id="linkedin_saved_scan",
+        replace_existing=True,
+    )
+    scheduler.start()
+    print(f"[worker] LinkedIn saved-scan scheduler armed: cron='{cron}' (UTC)")
+    return scheduler
+
+
 def run_forever() -> None:
     load_dotenv()
     _reset_stuck_items()
+    scheduler = _start_scheduler()
     print("ContentPilot worker started. Polling for jobs...")
-    while True:
-        job = _next_queued_job()
-        if job is None:
-            time.sleep(config.WORKER_POLL_INTERVAL_SEC)
-            continue
-        print(f"Processing job {job['id']} ({job['job_type']}: {job['target']})")
-        _run_job(job)
+    try:
+        while True:
+            job = _next_queued_job()
+            if job is None:
+                time.sleep(config.WORKER_POLL_INTERVAL_SEC)
+                continue
+            print(f"Processing job {job['id']} ({job['job_type']}: {job['target']})")
+            _run_job(job)
+    finally:
+        if scheduler is not None:
+            scheduler.shutdown(wait=False)
 
 
 if __name__ == "__main__":

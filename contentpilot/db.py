@@ -99,6 +99,16 @@ _MIGRATIONS = {
         CREATE INDEX idx_ingest_job_items_job_id ON ingest_job_items(job_id);
         CREATE INDEX idx_ingest_job_items_status ON ingest_job_items(status);
     """,
+    3: """
+        ALTER TABLE sources ADD COLUMN saved_at INTEGER;
+
+        CREATE TABLE card_flags (
+            card_id INTEGER NOT NULL REFERENCES cards(id),
+            flag TEXT NOT NULL CHECK (flag IN ('study', 'build', 'apply', 'share')),
+            flagged_at INTEGER NOT NULL,
+            PRIMARY KEY (card_id, flag)
+        );
+    """,
 }
 
 

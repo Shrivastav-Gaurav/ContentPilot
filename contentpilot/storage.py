@@ -367,3 +367,78 @@ def retry_failed_items(job_id: int) -> int:
         return cursor.rowcount
     finally:
         conn.close()
+
+
+# --- Saved items / flags ---------------------------------------------------
+
+VALID_FLAGS = ("study", "build", "apply", "share")
+
+
+def mark_source_saved(source_id: int) -> None:
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE sources SET saved_at = ? WHERE id = ? AND saved_at IS NULL",
+            (int(time.time()), source_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_saved_cards(lens: str = "tpm") -> list[dict]:
+    """Cards whose source was marked saved, newest-saved first, with their flags."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT cards.*, sources.canonical_url, sources.title AS source_title,
+                   sources.saved_at, sources.source_type
+            FROM cards
+            JOIN sources ON cards.source_id = sources.id
+            WHERE sources.saved_at IS NOT NULL AND cards.lens = ? AND cards.status = 'ok'
+            ORDER BY sources.saved_at DESC
+            """,
+            (lens,),
+        ).fetchall()
+
+        cards = []
+        for row in rows:
+            card = dict(row)
+            card["extraction"] = json.loads(card["extraction_json"])
+            flag_rows = conn.execute(
+                "SELECT flag FROM card_flags WHERE card_id = ?", (card["id"],)
+            ).fetchall()
+            card["flags"] = {r["flag"] for r in flag_rows}
+            cards.append(card)
+        return cards
+    finally:
+        conn.close()
+
+
+def toggle_card_flag(card_id: int, flag: str) -> bool:
+    """Toggles a flag on a card. Returns True if now set, False if now cleared."""
+    if flag not in VALID_FLAGS:
+        raise ValueError(f"Invalid flag: {flag!r}. Expected one of {VALID_FLAGS}.")
+
+    conn = get_connection()
+    try:
+        existing = conn.execute(
+            "SELECT 1 FROM card_flags WHERE card_id = ? AND flag = ?", (card_id, flag)
+        ).fetchone()
+
+        if existing:
+            conn.execute(
+                "DELETE FROM card_flags WHERE card_id = ? AND flag = ?", (card_id, flag)
+            )
+            conn.commit()
+            return False
+
+        conn.execute(
+            "INSERT INTO card_flags (card_id, flag, flagged_at) VALUES (?, ?, ?)",
+            (card_id, flag, int(time.time())),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
