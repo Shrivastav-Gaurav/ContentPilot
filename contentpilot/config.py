@@ -27,6 +27,11 @@ DEFAULT_LINKEDIN_SCAN_WINDOW = "30d"
 DEFAULT_LINKEDIN_SCAN_ENABLED = False
 DEFAULT_LINKEDIN_SCAN_CRON = "30 17 * * 0"  # Sunday 23:00 IST = 17:30 UTC
 
+# Synthesis quality matters more than cost here — always a Sonnet-tier model,
+# independent of OPENROUTER_MODEL (which stays Haiku for bulk extraction).
+SYNTHESIS_MODEL_ENV = "SYNTHESIS_MODEL"
+DEFAULT_SYNTHESIS_MODEL = "anthropic/claude-sonnet-5"
+
 
 def openrouter_api_key() -> str:
     return os.environ[OPENROUTER_API_KEY_ENV]
@@ -58,3 +63,7 @@ def linkedin_scan_enabled() -> bool:
 
 def linkedin_scan_cron() -> str:
     return os.environ.get("LINKEDIN_SCAN_CRON", DEFAULT_LINKEDIN_SCAN_CRON)
+
+
+def synthesis_model() -> str:
+    return os.environ.get(SYNTHESIS_MODEL_ENV, DEFAULT_SYNTHESIS_MODEL)

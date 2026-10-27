@@ -80,6 +80,34 @@ def _extract_title(text: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
+# LinkedIn's guest-view markdown puts the author name as its own link right
+# after the profile-image link, tagged with "feed-actor-name" in the trk
+# param — this is the one part of the generic nav chrome that's actually
+# per-post data, not boilerplate. Falls back to None (not every source is
+# LinkedIn, and malformed/unusual pages shouldn't raise).
+_AUTHOR_PATTERN = re.compile(
+    r"\[([^\]\[]{2,100})\]\([^)]*feed-actor-name[^)]*\)"
+)
+
+
+def _extract_author(text: str) -> str | None:
+    match = _AUTHOR_PATTERN.search(text)
+    if not match:
+        return None
+    name = match.group(1).strip()
+    return name or None
+
+
+def _extract_author_url(text: str) -> str | None:
+    match = _AUTHOR_PATTERN.search(text)
+    if not match:
+        return None
+    url_match = re.search(r"\(([^)]*feed-actor-name[^)]*)\)", match.group(0))
+    if not url_match:
+        return None
+    return url_match.group(1).split("?")[0]
+
+
 def fetch(url: str) -> RawContent:
     canonical = canonicalize(url)
     headers = {}
@@ -109,9 +137,9 @@ def fetch(url: str) -> RawContent:
         external_id=canonical,
         canonical_url=canonical,
         title=_extract_title(text),
-        author_name=None,
+        author_name=_extract_author(text),
         author_channel_id=None,
-        author_url=None,
+        author_url=_extract_author_url(text),
         published_at=None,
         duration_sec=None,
         language=None,

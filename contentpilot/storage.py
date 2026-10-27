@@ -173,7 +173,37 @@ def save_card(source_id: int, lens: str, result: ExtractionResult) -> int:
             card_id = cursor.lastrowid
 
         _index_card(conn, card_id)
+        _sync_fts(conn, card_id)
         return card_id
+    finally:
+        conn.close()
+
+
+def _sync_fts(conn, card_id: int) -> None:
+    row = conn.execute("SELECT extraction_json, summary FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if row is None:
+        return
+
+    extraction = json.loads(row["extraction_json"])
+    key_learnings_text = " ".join(extraction.get("key_learnings", []))
+
+    conn.execute("DELETE FROM cards_fts WHERE card_id = ?", (card_id,))
+    conn.execute(
+        "INSERT INTO cards_fts (card_id, summary, key_learnings_text) VALUES (?, ?, ?)",
+        (card_id, row["summary"] or "", key_learnings_text),
+    )
+    conn.commit()
+
+
+def backfill_fts() -> int:
+    """(Re)populates cards_fts for every ok card. Safe to re-run."""
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM cards_fts")
+        card_ids = [row["id"] for row in conn.execute("SELECT id FROM cards WHERE status = 'ok'")]
+        for card_id in card_ids:
+            _sync_fts(conn, card_id)
+        return len(card_ids)
     finally:
         conn.close()
 

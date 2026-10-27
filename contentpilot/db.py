@@ -109,6 +109,16 @@ _MIGRATIONS = {
             PRIMARY KEY (card_id, flag)
         );
     """,
+    4: """
+        -- key_learnings_text holds the flattened JSON array (key_learnings)
+        -- as space-joined text; populated by the app (not a generated column)
+        -- since extraction_json's structure isn't directly FTS-indexable.
+        CREATE VIRTUAL TABLE cards_fts USING fts5(
+            card_id UNINDEXED,
+            summary,
+            key_learnings_text
+        );
+    """,
 }
 
 
