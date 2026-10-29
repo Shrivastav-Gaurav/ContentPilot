@@ -472,3 +472,75 @@ def toggle_card_flag(card_id: int, flag: str) -> bool:
         return True
     finally:
         conn.close()
+
+
+# --- Card chat -------------------------------------------------------------
+
+def save_chat_turn(card_id: int, role: str, content: str) -> None:
+    if role not in ("user", "assistant"):
+        raise ValueError(f"Invalid role: {role!r}. Expected 'user' or 'assistant'.")
+
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO card_chats (card_id, role, content) VALUES (?, ?, ?)",
+            (card_id, role, content),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_chat_history(card_id: int) -> list[dict]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT role, content FROM card_chats WHERE card_id = ? ORDER BY created_at, id",
+            (card_id,),
+        ).fetchall()
+        return [{"role": r["role"], "content": r["content"]} for r in rows]
+    finally:
+        conn.close()
+
+
+def clear_chat_history(card_id: int) -> None:
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM card_chats WHERE card_id = ?", (card_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_card_chat_context(card_id: int) -> dict | None:
+    """Everything card_chat_agent needs to build its system prompt: card
+    extraction fields plus source title/author and the raw source text."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT cards.extraction_json, sources.title AS source_title,
+                   sources.raw_text, authors.name AS author_name
+            FROM cards
+            JOIN sources ON cards.source_id = sources.id
+            LEFT JOIN authors ON sources.author_id = authors.id
+            WHERE cards.id = ?
+            """,
+            (card_id,),
+        ).fetchone()
+        if row is None:
+            return None
+
+        extraction = json.loads(row["extraction_json"])
+        return {
+            "title": extraction.get("title") or row["source_title"] or "Untitled",
+            "author": row["author_name"] or "Unknown",
+            "summary": extraction.get("summary", ""),
+            "key_learnings": extraction.get("key_learnings", []),
+            "topics": extraction.get("topics", []),
+            "build_ideas": extraction.get("build_ideas", []),
+            "job_signals": extraction.get("job_signals", []),
+            "content_snippet": (row["raw_text"] or "")[:3000],
+        }
+    finally:
+        conn.close()

@@ -119,6 +119,16 @@ _MIGRATIONS = {
             key_learnings_text
         );
     """,
+    5: """
+        CREATE TABLE IF NOT EXISTS card_chats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+            content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_card_chats_card_id ON card_chats(card_id);
+    """,
 }
 
 

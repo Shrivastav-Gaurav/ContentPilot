@@ -1,16 +1,21 @@
 import streamlit as st
 from dotenv import load_dotenv
 
-from contentpilot import config
-from contentpilot.storage import VALID_FLAGS, list_saved_cards, toggle_card_flag
+from contentpilot.rag.card_chat_agent import STARTERS, chat
+from contentpilot.storage import clear_chat_history, list_saved_cards, load_chat_history
 
 load_dotenv()
 
 st.set_page_config(page_title="Saved — ContentPilot", page_icon="📌")
 st.title("Saved")
-st.caption("Cards from your LinkedIn saved posts, newest scan first.")
+st.caption("Cards from your LinkedIn saved posts. Talk to each one — ask it to explain, quiz you, or find interview angles.")
 
-FLAG_LABELS = {"study": "📚 Study", "build": "🔨 Build", "apply": "💼 Apply", "share": "📤 Share"}
+STARTER_LABELS = {"study": "📚 Study", "build": "🔨 Build", "apply": "💼 Apply", "share": "📤 Share"}
+
+if "open_chat_card_id" not in st.session_state:
+    st.session_state.open_chat_card_id = None
+if "pending_starter" not in st.session_state:
+    st.session_state.pending_starter = None
 
 if st.button("Scan LinkedIn Saved Now"):
     try:
@@ -28,31 +33,55 @@ cards = list_saved_cards()
 
 if not cards:
     st.caption("No saved cards yet. Run a scan above, or wait for the scheduled weekly scan.")
-else:
-    for card in cards:
-        extraction = card["extraction"]
-        with st.container(border=True):
-            st.subheader(extraction.get("title") or card.get("source_title") or "Untitled")
-            st.caption(extraction.get("summary", ""))
-            st.caption(f"[Source]({card['canonical_url']})")
 
-            cols = st.columns(len(VALID_FLAGS))
-            for col, flag in zip(cols, VALID_FLAGS):
-                is_set = flag in card["flags"]
-                label = FLAG_LABELS[flag] + (" ✓" if is_set else "")
-                if col.button(label, key=f"flag_{card['id']}_{flag}"):
-                    toggle_card_flag(card["id"], flag)
+for card in cards:
+    extraction = card["extraction"]
+    card_id = card["id"]
+    title = extraction.get("title") or card.get("source_title") or "Untitled"
+    is_open = st.session_state.open_chat_card_id == card_id
+
+    with st.expander(f"{title}  —  {extraction.get('summary', '')[:80]}", expanded=is_open):
+        st.caption(f"[Source]({card['canonical_url']})")
+
+        if not is_open:
+            cols = st.columns(len(STARTERS))
+            for col, flag in zip(cols, STARTERS):
+                if col.button(STARTER_LABELS[flag], key=f"open_{card_id}_{flag}"):
+                    st.session_state.open_chat_card_id = card_id
+                    st.session_state.pending_starter = STARTERS[flag]
                     st.rerun()
+        else:
+            history = load_chat_history(card_id)
+            for turn in history:
+                with st.chat_message(turn["role"]):
+                    st.markdown(turn["content"])
 
-            with st.expander("Details"):
-                st.markdown("**Key Learnings**")
-                for item in extraction["key_learnings"]:
-                    st.markdown(f"- {item}")
-                if extraction["build_ideas"]:
-                    st.markdown("**Build Ideas**")
-                    for item in extraction["build_ideas"]:
-                        st.markdown(f"- {item}")
-                if extraction["job_signals"]:
-                    st.markdown("**Job Signals**")
-                    for item in extraction["job_signals"]:
-                        st.markdown(f"- {item}")
+            col_close, col_clear = st.columns(2)
+            if col_close.button("Close chat", key=f"close_{card_id}"):
+                st.session_state.open_chat_card_id = None
+                st.session_state.pending_starter = None
+                st.rerun()
+            if col_clear.button("Clear chat", key=f"clear_{card_id}"):
+                clear_chat_history(card_id)
+                st.rerun()
+
+            pending = st.session_state.pending_starter
+            if pending:
+                st.session_state.pending_starter = None
+                with st.chat_message("user"):
+                    st.markdown(pending)
+                with st.spinner("Thinking..."):
+                    reply = chat(card_id, pending, history=history)
+                with st.chat_message("assistant"):
+                    st.markdown(reply)
+                st.rerun()
+
+            user_message = st.chat_input("Ask anything about this post...", key=f"input_{card_id}")
+            if user_message:
+                with st.chat_message("user"):
+                    st.markdown(user_message)
+                with st.spinner("Thinking..."):
+                    reply = chat(card_id, user_message, history=history)
+                with st.chat_message("assistant"):
+                    st.markdown(reply)
+                st.rerun()
