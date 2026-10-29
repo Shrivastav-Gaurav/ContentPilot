@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from contentpilot import config
 from contentpilot.rag.retriever import RetrievedChunk
+from contentpilot.tracing import trace_llm_call
 
 SYSTEM_PROMPT = """You are an expert TPM interview coach. Synthesize insights \
 from multiple SME sources into a structured answer a senior TPM candidate \
@@ -113,23 +114,26 @@ def _call_openrouter(query: str, chunks: list[RetrievedChunk], extra_instruction
 
 
 def synthesize(query: str, chunks: list[RetrievedChunk]) -> SynthesisResult:
-    payload = _call_openrouter(query, chunks)
-    raw = payload["choices"][0]["message"]["content"]
-
-    try:
-        parsed = SynthesisResult.model_validate_json(_strip_json_fences(raw))
-    except (ValidationError, json.JSONDecodeError) as first_error:
-        retry_instruction = (
-            "Your previous response failed validation with this error:\n"
-            f"{first_error}\n"
-            "Respond again with ONLY the corrected valid JSON in the exact shape requested."
-        )
-        payload = _call_openrouter(query, chunks, extra_instruction=retry_instruction)
+    # confidence isn't known until the LLM responds, so it can't be a trace
+    # tag (tags are set at span creation); query is tagged here instead.
+    with trace_llm_call("interview_synthesis", query=query):
+        payload = _call_openrouter(query, chunks)
         raw = payload["choices"][0]["message"]["content"]
+
         try:
             parsed = SynthesisResult.model_validate_json(_strip_json_fences(raw))
-        except (ValidationError, json.JSONDecodeError) as second_error:
-            raise SynthesisValidationError(str(second_error)) from second_error
+        except (ValidationError, json.JSONDecodeError) as first_error:
+            retry_instruction = (
+                "Your previous response failed validation with this error:\n"
+                f"{first_error}\n"
+                "Respond again with ONLY the corrected valid JSON in the exact shape requested."
+            )
+            payload = _call_openrouter(query, chunks, extra_instruction=retry_instruction)
+            raw = payload["choices"][0]["message"]["content"]
+            try:
+                parsed = SynthesisResult.model_validate_json(_strip_json_fences(raw))
+            except (ValidationError, json.JSONDecodeError) as second_error:
+                raise SynthesisValidationError(str(second_error)) from second_error
 
     if len(chunks) < 3:
         parsed.confidence = "low"

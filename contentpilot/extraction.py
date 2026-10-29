@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from contentpilot import config
 from contentpilot.prompts import tpm_lens
+from contentpilot.tracing import trace_llm_call
 
 # Haiku's context window is ~200k tokens (~800k chars). Chunk only beyond that.
 _MAX_CHARS_SINGLE_PASS = 600_000
@@ -81,29 +82,33 @@ def _call_openrouter(content: str, extra_instruction: str = "") -> dict:
     return response.json()
 
 
-def extract_tpm_lens(content: str) -> ExtractionResult:
+def extract_tpm_lens(content: str, source_id: int | None = None) -> ExtractionResult:
     if len(content) > _MAX_CHARS_SINGLE_PASS:
         content = content[:_CHUNK_CHARS]
 
-    payload = _call_openrouter(content)
-    raw = payload["choices"][0]["message"]["content"]
-    usage = payload.get("usage", {})
-
-    try:
-        parsed = Extraction.model_validate_json(_strip_json_fences(raw))
-    except (ValidationError, json.JSONDecodeError) as first_error:
-        retry_instruction = (
-            "Your previous response failed validation with this error:\n"
-            f"{first_error}\n"
-            "Respond again with ONLY the corrected valid JSON in the exact shape requested."
-        )
-        payload = _call_openrouter(content, extra_instruction=retry_instruction)
+    # content_type isn't known until the LLM responds, so it can't be a trace
+    # tag (tags are set at span creation); source_id is the one identifying
+    # tag available before the call, and is traced here.
+    with trace_llm_call("card_extraction", source_id=source_id):
+        payload = _call_openrouter(content)
         raw = payload["choices"][0]["message"]["content"]
         usage = payload.get("usage", {})
+
         try:
             parsed = Extraction.model_validate_json(_strip_json_fences(raw))
-        except (ValidationError, json.JSONDecodeError) as second_error:
-            raise ExtractionValidationError(str(second_error)) from second_error
+        except (ValidationError, json.JSONDecodeError) as first_error:
+            retry_instruction = (
+                "Your previous response failed validation with this error:\n"
+                f"{first_error}\n"
+                "Respond again with ONLY the corrected valid JSON in the exact shape requested."
+            )
+            payload = _call_openrouter(content, extra_instruction=retry_instruction)
+            raw = payload["choices"][0]["message"]["content"]
+            usage = payload.get("usage", {})
+            try:
+                parsed = Extraction.model_validate_json(_strip_json_fences(raw))
+            except (ValidationError, json.JSONDecodeError) as second_error:
+                raise ExtractionValidationError(str(second_error)) from second_error
 
     return ExtractionResult(
         extraction=parsed,
