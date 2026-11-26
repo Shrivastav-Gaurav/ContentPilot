@@ -40,13 +40,10 @@ def fake_llm_factory(calls):
 
 
 @pytest.fixture()
-def conn(tmp_path, monkeypatch):
-    # Point the db module straight at a temp file. Never touches the real database.
+def conn():
+    # tests/conftest.py already points the db at a temp file for every test.
     from contentpilot import db
-    test_db = str(tmp_path / "t.sqlite3")
-    monkeypatch.setattr(db, "_DB_PATH", test_db)
     c = db.get_connection()
-    assert c.execute("PRAGMA database_list").fetchone()[2] == test_db, "refusing to run on a non-temp database"
     posts = [
         ("We are hiring a Senior TPM", "2026-11-20T10:00:00.000Z", "Priya Menon", "We are hiring a Senior TPM for AI platform."),
         ("Old hiring post", "2026-08-01T10:00:00.000Z", "Mark Ellison", "Hiring remote PMs."),
