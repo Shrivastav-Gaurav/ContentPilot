@@ -129,6 +129,92 @@ _MIGRATIONS = {
         );
         CREATE INDEX IF NOT EXISTS idx_card_chats_card_id ON card_chats(card_id);
     """,
+    6: """
+        -- ContentPilot v3 (copilot): post type, status, due dates, actions,
+        -- job tracking, cached outputs, prep notebook, full-text search.
+        ALTER TABLE sources ADD COLUMN intent TEXT;
+
+        CREATE TABLE post_state (
+            source_id INTEGER PRIMARY KEY REFERENCES sources(id),
+            post_type TEXT CHECK (post_type IN ('job', 'learning', 'post_idea', 'tool', 'noise')),
+            status TEXT NOT NULL DEFAULT 'open'
+                CHECK (status IN ('open', 'done', 'read', 'parked', 'archived', 'dismissed')),
+            summary TEXT,
+            suggested_action TEXT,
+            role_title TEXT,
+            due_at INTEGER,
+            reminders_sent INTEGER NOT NULL DEFAULT 0,
+            snoozed_until INTEGER,
+            triage_version TEXT,
+            updated_at INTEGER
+        );
+        CREATE INDEX idx_post_state_status ON post_state(status, due_at);
+
+        CREATE TABLE actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL REFERENCES sources(id),
+            action TEXT NOT NULL,
+            destination TEXT,
+            note TEXT,
+            created_at INTEGER NOT NULL,
+            undone_at INTEGER
+        );
+        CREATE INDEX idx_actions_source ON actions(source_id);
+        CREATE INDEX idx_actions_created ON actions(created_at);
+
+        CREATE TABLE job_tracking (
+            source_id INTEGER PRIMARY KEY REFERENCES sources(id),
+            fit_score INTEGER,
+            fit_reason TEXT,
+            user_status TEXT NOT NULL DEFAULT 'not_started'
+                CHECK (user_status IN ('not_started', 'in_progress', 'applied', 'deferred', 'not_a_fit')),
+            note TEXT,
+            deferred_until INTEGER,
+            pack_copied_at INTEGER,
+            updated_at INTEGER
+        );
+
+        CREATE TABLE outputs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            cache_key TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            content_json TEXT NOT NULL,
+            model TEXT,
+            cost_usd REAL,
+            created_at INTEGER NOT NULL,
+            UNIQUE (kind, cache_key, prompt_version)
+        );
+
+        CREATE TABLE prep_topics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            sort_order INTEGER
+        );
+
+        CREATE TABLE prep_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic_id INTEGER NOT NULL REFERENCES prep_topics(id),
+            source_id INTEGER REFERENCES sources(id),
+            text TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+
+        CREATE VIRTUAL TABLE posts_fts USING fts5(
+            source_id UNINDEXED,
+            title,
+            publisher,
+            body,
+            topics,
+            notes,
+            tokenize = 'unicode61 remove_diacritics 2'
+        );
+    """,
 }
 
 
