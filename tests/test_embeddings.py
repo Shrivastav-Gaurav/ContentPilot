@@ -184,7 +184,7 @@ def test_search_by_meaning_ranks_and_filters(library):
     _embed_all(library)
     fake = FakeEmbedder()
     results = search.search(library, "how do you get engineering and product to agree", by_meaning=True,
-                            embedder=fake, now=NOW)
+                            embedder=fake, now=NOW, min_match=0.0)
     assert results[0]["id"] == 7 or results[0]["similarity"] >= results[1]["similarity"]
     assert [r["similarity"] for r in results] == sorted((r["similarity"] for r in results), reverse=True)
     assert len(results) == 7
@@ -192,6 +192,37 @@ def test_search_by_meaning_ranks_and_filters(library):
     rag = search.search(library, "retrieval augmented generation", by_meaning=True, embedder=FakeEmbedder(), now=NOW)
     assert rag[0]["id"] == 3                                       # "Hybrid retrieval and reranking"
 
-    dismissed = search.search(library, "retrieval", status="dismissed", by_meaning=True, embedder=fake, now=NOW)
+    dismissed = search.search(library, "retrieval", status="dismissed", by_meaning=True, embedder=fake, now=NOW,
+                              min_match=0.0)
     assert {r["id"] for r in dismissed} == {4}                     # filters still apply
     assert search.meaning_search_ready(library) is False or True   # depends on the key; never raises
+
+
+def test_search_by_meaning_min_match_setting_and_ask_unaffected(library):
+    from contentpilot.copilot import search
+    from contentpilot.rag import retriever
+    _embed_all(library)
+    fake = FakeEmbedder()
+    q = "how do you get engineering and product to agree"   # best post: the course, 31% similar
+
+    assert search.get_min_match(library) == 0.35                                    # default
+    assert search.search(library, q, by_meaning=True, embedder=fake, now=NOW) == []  # nothing close -> page hint
+
+    search.set_min_match(library, 30)                                               # "30" or 0.30 both work
+    assert search.get_min_match(library) == pytest.approx(0.30)
+    hits = search.search(library, q, by_meaning=True, embedder=fake, now=NOW)
+    assert [h["id"] for h in hits] == [7] and hits[0]["similarity"] >= 0.30
+
+    rag = search.search(library, "retrieval augmented generation", by_meaning=True, embedder=fake, now=NOW)
+    assert [h["id"] for h in rag] == [3]                                            # only the close one
+
+    library.execute("UPDATE settings SET value = 'not a number' WHERE key = 'search.min_match'")
+    assert search.get_min_match(library) == 0.35                                    # bad value -> default
+    with pytest.raises(ValueError):
+        search.set_min_match(library, 150)
+
+    # Ask ignores the threshold: still the top 8, even when every post is a weak match.
+    search.set_min_match(library, 0.99)
+    library.commit()
+    chunks = retriever.retrieve_hybrid(QUESTION, embedder=fake, now=NOW)
+    assert len(chunks) == 8

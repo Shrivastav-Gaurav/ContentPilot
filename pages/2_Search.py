@@ -30,6 +30,7 @@ text = st.text_input("Search", placeholder="keyword, phrase or publisher", label
 
 with service.transaction() as conn:
     meaning_ready = search.meaning_search_ready(conn)
+    min_match = search.get_min_match(conn)
 by_meaning = st.toggle(
     "Search by meaning", key="by_meaning", disabled=not meaning_ready,
     help=("Finds posts about the same idea even when the words differ. One tiny embedding call per new search."
@@ -82,9 +83,11 @@ except Exception as exc:  # cap reached or the embeddings API failed: fall back 
 
 filtered = bool(text.strip()) or any(v != "Any" for v in (status, post_type, published, source))
 st.caption(f"{len(results)} result{'s' if len(results) != 1 else ''}"
-           + (" · closest in meaning first" if meaning else "") + ("" if filtered else " · latest saved posts")
+           + (f" · {min_match:.0%}+ match, closest first" if meaning else "") + ("" if filtered else " · latest saved posts")
            + (" (showing the first 50)" if len(results) == 50 else ""))
-if not results:
+if not results and meaning:
+    st.info("No close matches - try keywords")
+elif not results:
     st.info("No posts match. Try fewer words or set the filters to Any.")
 
 for r in results:

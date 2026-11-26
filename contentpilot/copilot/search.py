@@ -101,11 +101,13 @@ def search(
     by_meaning: bool = False,
     embedder=None,
     now: int | None = None,
+    min_match: float | None = None,
 ) -> list[dict]:
     """Search all posts. status: None/'any', 'open', 'actioned' (done/read/parked), 'archived', 'dismissed'.
 
     by_meaning=True ranks posts by cosine similarity of stored embeddings to the text
-    (filters still apply) and adds a 'similarity' to each row. It embeds new posts and the
+    (filters still apply) and adds a 'similarity' to each row. Only posts at or above
+    min_match (default: the search.min_match setting, 0.35) are returned. It embeds new posts and the
     query first (cost logged in outputs) and raises DailyCapReached instead of calling
     when the cap is reached. Leaves commit to the caller.
     """
@@ -116,7 +118,8 @@ def search(
         embeddings.embed_pending(conn, embedder=embedder, now=now)
         qvec = embeddings.embed_query(conn, text, embedder=embedder, now=now)
         hits = embeddings.rank(conn, "post", qvec, top_k=1000)
-        ranked = {item_id: (i, sim) for i, (item_id, sim) in enumerate(hits)}
+        threshold = get_min_match(conn) if min_match is None else min_match
+        ranked = {item_id: (i, sim) for i, (item_id, sim) in enumerate(hits) if sim >= threshold}
         if not ranked:
             return []
         where.append(f"s.id IN ({','.join('?' * len(ranked))})")
@@ -163,6 +166,28 @@ def search(
         out.sort(key=lambda d: ranked[d["id"]][0])
         out = out[:limit]
     return out
+
+
+MIN_MATCH_KEY = "search.min_match"
+DEFAULT_MIN_MATCH = 0.35
+
+
+def get_min_match(conn) -> float:
+    """Lowest similarity (0-1) Search by meaning shows. Setting search.min_match; Ask ignores it."""
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (MIN_MATCH_KEY,)).fetchone()
+    try:
+        value = float(row[0]) if row else DEFAULT_MIN_MATCH
+    except (TypeError, ValueError):
+        return DEFAULT_MIN_MATCH
+    return value / 100 if value > 1 else value  # accept "35" as well as "0.35"
+
+
+def set_min_match(conn, value: float) -> None:
+    value = value / 100 if value > 1 else value
+    if not 0 <= value <= 1:
+        raise ValueError("search.min_match must be between 0 and 1 (or 0-100)")
+    conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
+                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (MIN_MATCH_KEY, str(value)))
 
 
 def meaning_search_ready(conn) -> bool:
