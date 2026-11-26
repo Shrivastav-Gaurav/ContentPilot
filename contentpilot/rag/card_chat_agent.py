@@ -68,7 +68,6 @@ def chat(card_id: int, user_message: str, history: list[dict] | None = None) -> 
     if history is None:
         history = load_chat_history(card_id)
 
-    api_key = config.openrouter_api_key()
     model = config.synthesis_model()
 
     messages = [{"role": "system", "content": _build_system_prompt(context)}]
@@ -78,7 +77,7 @@ def chat(card_id: int, user_message: str, history: list[dict] | None = None) -> 
     with trace_llm_call("card_chat", card_id=card_id):
         response = requests.post(
             config.OPENROUTER_URL,
-            headers={"Authorization": f"Bearer {api_key}"},
+            headers=config.openrouter_headers(),
             json={"model": model, "messages": messages, "temperature": 0.6},
             timeout=120,
         )

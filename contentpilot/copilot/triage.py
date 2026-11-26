@@ -68,7 +68,7 @@ LLM = Callable[[str, str], tuple[str, dict]]
 def openrouter_llm(system: str, user: str) -> tuple[str, dict]:
     response = requests.post(
         config.OPENROUTER_URL,
-        headers={"Authorization": f"Bearer {config.openrouter_api_key()}"},
+        headers=config.openrouter_headers(),
         json={
             "model": config.openrouter_model(),
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],

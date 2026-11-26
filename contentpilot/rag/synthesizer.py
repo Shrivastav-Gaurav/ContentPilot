@@ -99,7 +99,6 @@ def _format_sources(chunks: list[RetrievedChunk]) -> str:
 
 
 def _call_openrouter(query: str, chunks: list[RetrievedChunk], extra_instruction: str = "") -> dict:
-    api_key = config.openrouter_api_key()
     model = config.synthesis_model()
 
     user_content = (
@@ -111,7 +110,7 @@ def _call_openrouter(query: str, chunks: list[RetrievedChunk], extra_instruction
 
     response = requests.post(
         config.OPENROUTER_URL,
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers=config.openrouter_headers(),
         json={
             "model": model,
             "messages": [

@@ -37,6 +37,19 @@ def openrouter_api_key() -> str:
     return os.environ[OPENROUTER_API_KEY_ENV]
 
 
+OPENROUTER_APP_URL = "https://github.com/Shrivastav-Gaurav/ContentPilot"
+OPENROUTER_APP_TITLE = "ContentPilot"
+
+
+def openrouter_headers() -> dict[str, str]:
+    """Headers for every OpenRouter call: auth plus app attribution (HTTP-Referer, X-Title)."""
+    return {
+        "Authorization": f"Bearer {openrouter_api_key()}",
+        "HTTP-Referer": OPENROUTER_APP_URL,
+        "X-Title": OPENROUTER_APP_TITLE,
+    }
+
+
 def openrouter_model() -> str:
     return os.environ.get(OPENROUTER_MODEL_ENV, DEFAULT_OPENROUTER_MODEL)
 

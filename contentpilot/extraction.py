@@ -58,7 +58,6 @@ def _strip_json_fences(raw: str) -> str:
 
 
 def _call_openrouter(content: str, extra_instruction: str = "") -> dict:
-    api_key = config.openrouter_api_key()
     model = config.openrouter_model()
 
     user_content = f"<content>\n{content}\n</content>"
@@ -67,7 +66,7 @@ def _call_openrouter(content: str, extra_instruction: str = "") -> dict:
 
     response = requests.post(
         config.OPENROUTER_URL,
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers=config.openrouter_headers(),
         json={
             "model": model,
             "messages": [
