@@ -19,7 +19,7 @@ from contentpilot.db import get_connection
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true", help="roll back at the end; skip the LLM")
-    parser.add_argument("--cap", type=float, default=0.10, help="daily API spend cap in USD")
+    parser.add_argument("--cap", type=float, default=None, help="daily API spend cap in USD (default: the api.daily_cap_usd setting, 0.25)")
     args = parser.parse_args()
     load_dotenv()
 

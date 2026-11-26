@@ -3,6 +3,7 @@ import json
 import time
 
 from contentpilot import config
+from contentpilot.copilot.spend import log_cost
 from contentpilot.db import get_connection
 from contentpilot.extraction import ExtractionResult
 from contentpilot.fetchers.base import RawContent
@@ -171,6 +172,10 @@ def save_card(source_id: int, lens: str, result: ExtractionResult) -> int:
             )
             conn.commit()
             card_id = cursor.lastrowid
+
+        log_cost(conn, "extraction", f"card:{card_id}@{time.time_ns()}", result.model, result.cost_usd,
+                 {"source_id": source_id, "lens": lens}, now=now, version=result.prompt_version)
+        conn.commit()
 
         _index_card(conn, card_id)
         _sync_fts(conn, card_id)

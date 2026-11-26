@@ -182,9 +182,23 @@ def _process_item(job_id: int, item: dict, cost_cap_usd: float, job_type: str) -
         _mark_item(item_id, status="unavailable", error=str(exc))
         _increment_job_counters(job_id, failed=1)
     except ExtractionValidationError as exc:
+        _log_failed_extraction(url, exc)
         _retry_or_fail(job_id, item_id, attempt, max_attempts, str(exc))
     except Exception as exc:
         _retry_or_fail(job_id, item_id, attempt, max_attempts, str(exc))
+
+
+def _log_failed_extraction(url: str, exc: ExtractionValidationError) -> None:
+    if not getattr(exc, "cost_usd", 0):
+        return
+    from contentpilot.copilot.spend import log_cost
+    conn = get_connection()
+    try:
+        log_cost(conn, "extraction", f"failed:{url}@{time.time_ns()}", exc.model, exc.cost_usd,
+                 {"url": url, "failed": True}, version=tpm_lens.VERSION)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _retry_or_fail(job_id: int, item_id: int, attempt: int, max_attempts: int, error: str) -> None:

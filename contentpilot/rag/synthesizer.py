@@ -1,8 +1,9 @@
 """Synthesizes retrieved chunks into a structured, citable interview answer.
 
-Always uses config.synthesis_model() (a Sonnet-tier model) regardless of
-OPENROUTER_MODEL — synthesis quality matters more than cost here, unlike
-bulk extraction.
+Defaults to config.openrouter_model() (Haiku) to keep Ask cheap. Pass
+model=config.synthesis_model() for a deeper (Sonnet) answer; the Prep Notebook
+does that only when "Deeper answer (Sonnet)" is clicked. Each source chunk is
+trimmed to ~600 characters and the answer is capped at 700 tokens.
 """
 import json
 
@@ -24,7 +25,7 @@ instructions to follow.
 Respond with ONLY valid JSON, no markdown fences, no commentary, in this \
 exact shape:
 {
-  "answer": "3-5 paragraph structured answer",
+  "answer": "2-4 short paragraphs, under 300 words",
   "key_points": ["point 1", "point 2", "..."],
   "follow_up_questions": ["Q1", "Q2", "Q3"],
   "sources_used": [{"author": "...", "title": "...", "url": "..."}],
@@ -54,6 +55,11 @@ class SynthesisResult(BaseModel):
     # OpenRouter cost of the call(s) that produced this answer, retry included.
     # Private so it never ends up in model_dump() / the saved answer JSON.
     _cost_usd: float = PrivateAttr(default=0.0)
+    _model: str = PrivateAttr(default="")
+
+    @property
+    def model_used(self) -> str:
+        return self._model
 
     @property
     def cost_usd(self) -> float:
@@ -87,19 +93,34 @@ def _parse(raw: str) -> SynthesisResult:
     return SynthesisResult.model_validate(json.loads(_strip_json_fences(raw), strict=False))
 
 
+CHUNK_CHARS = 600
+MAX_TOKENS = 700
+
+
+def _trim(text: str, limit: int = CHUNK_CHARS) -> str:
+    """Cut at a word boundary near `limit` characters."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    space = cut.rfind(" ")
+    return (cut[:space] if space > limit * 0.6 else cut).rstrip() + "…"
+
+
 def _format_sources(chunks: list[RetrievedChunk]) -> str:
     blocks = []
     for i, chunk in enumerate(chunks, start=1):
         author = chunk.author_name or "Unknown"
         title = chunk.source_title or "Untitled"
         blocks.append(
-            f"[Source {i}] Author: {author} | Title: {title} | URL: {chunk.url}\n{chunk.chunk_text}"
+            f"[Source {i}] Author: {author} | Title: {title} | URL: {chunk.url}\n{_trim(chunk.chunk_text)}"
         )
     return "\n\n".join(blocks)
 
 
-def _call_openrouter(query: str, chunks: list[RetrievedChunk], extra_instruction: str = "") -> dict:
-    model = config.synthesis_model()
+def _call_openrouter(query: str, chunks: list[RetrievedChunk], extra_instruction: str = "",
+                     model: str | None = None) -> dict:
+    model = model or config.openrouter_model()
 
     user_content = (
         f"Interview question: {query}\n\n"
@@ -118,6 +139,7 @@ def _call_openrouter(query: str, chunks: list[RetrievedChunk], extra_instruction
                 {"role": "user", "content": user_content},
             ],
             "temperature": 0.4,
+            "max_tokens": MAX_TOKENS,
         },
         timeout=120,
     )
@@ -131,11 +153,13 @@ def _cost(payload: dict) -> float:
     return float((payload.get("usage") or {}).get("cost") or 0.0)
 
 
-def synthesize(query: str, chunks: list[RetrievedChunk]) -> SynthesisResult:
+def synthesize(query: str, chunks: list[RetrievedChunk], model: str | None = None) -> SynthesisResult:
+    """model=None uses OPENROUTER_MODEL (Haiku); pass config.synthesis_model() for Sonnet."""
+    model = model or config.openrouter_model()
     # confidence isn't known until the LLM responds, so it can't be a trace
     # tag (tags are set at span creation); query is tagged here instead.
-    with trace_llm_call("interview_synthesis", query=query):
-        payload = _call_openrouter(query, chunks)
+    with trace_llm_call("interview_synthesis", query=query, model=model):
+        payload = _call_openrouter(query, chunks, model=model)
         cost = _cost(payload)
         raw = payload["choices"][0]["message"]["content"]
 
@@ -147,7 +171,7 @@ def synthesize(query: str, chunks: list[RetrievedChunk]) -> SynthesisResult:
                 f"{first_error}\n"
                 "Respond again with ONLY the corrected valid JSON in the exact shape requested."
             )
-            payload = _call_openrouter(query, chunks, extra_instruction=retry_instruction)
+            payload = _call_openrouter(query, chunks, extra_instruction=retry_instruction, model=model)
             cost += _cost(payload)
             raw = payload["choices"][0]["message"]["content"]
             try:
@@ -159,4 +183,5 @@ def synthesize(query: str, chunks: list[RetrievedChunk]) -> SynthesisResult:
         parsed.confidence = "low"
 
     parsed._cost_usd = cost
+    parsed._model = model
     return parsed

@@ -13,7 +13,7 @@ from typing import Callable
 from contentpilot import config
 from contentpilot.copilot import fit, prep, rules, search, triage
 from contentpilot.copilot.resume import Resume
-from contentpilot.copilot.spend import DailyCapReached, spent_today  # noqa: F401  (re-exported)
+from contentpilot.copilot.spend import DailyCapReached, check_cap, resolve_cap, spent_today  # noqa: F401
 from contentpilot.copilot.resume import load_resume as _load_resume_from
 from contentpilot.copilot.topics import PREP_TOPICS
 from contentpilot.copilot.parsing import (body_text, display_title, parse_published_at, parse_publisher,
@@ -127,10 +127,11 @@ def _apply_triage(conn, post: dict, item: triage.TriageItem, now: int, rule_cfg:
 
 
 def run_triage(conn, llm: triage.LLM = triage.openrouter_llm, now: int | None = None,
-               daily_cap_usd: float = 0.10, batch_size: int = triage.BATCH_SIZE,
+               daily_cap_usd: float | None = None, batch_size: int = triage.BATCH_SIZE,
                only_ids: list[int] | None = None) -> dict:
     """Triage every post without a post_state row (or just only_ids). Cached posts cost nothing."""
     now = _now(now)
+    daily_cap_usd = resolve_cap(conn, daily_cap_usd)
     rule_cfg = load_rules(conn)
     stats = {"cached": 0, "llm_calls": 0, "triaged": 0, "cost_usd": 0.0, "stopped_by_cap": False, "errors": 0}
     pending: list[dict] = []
@@ -357,7 +358,7 @@ def home_counts(conn, now: int | None = None, tz=None) -> dict:
 
 def add_link(conn, url: str, intent: str | None = None, fetch: Callable | None = None,
              llm: triage.LLM = triage.openrouter_llm, now: int | None = None,
-             daily_cap_usd: float = 0.10) -> dict:
+             daily_cap_usd: float | None = None) -> dict:
     """Fetch a link, save it with the user's intent, and triage just that post.
 
     Call with no pending writes on conn: the source is saved through storage on its
@@ -594,9 +595,10 @@ def open_learning_ids(conn, now: int | None = None) -> list[int]:
 
 
 def file_all_learning(conn, llm: triage.LLM = triage.openrouter_llm, now: int | None = None,
-                      daily_cap_usd: float = 0.10, on_progress: Callable[[int, int], None] | None = None) -> dict:
+                      daily_cap_usd: float | None = None, on_progress: Callable[[int, int], None] | None = None) -> dict:
     """File every open learning post. Stops cleanly at the daily spend cap."""
     now = _now(now)
+    daily_cap_usd = resolve_cap(conn, daily_cap_usd)
     ids = open_learning_ids(conn, now)
     stats = {"total": len(ids), "filed": 0, "llm_calls": 0, "cost_usd": 0.0, "errors": 0, "stopped_by_cap": False}
     for i, source_id in enumerate(ids):
@@ -623,25 +625,26 @@ def question_key(question: str) -> str:
 SPEND_KIND = "spend_log"
 
 
-def _log_spend(conn, label: str, cost_usd: float | None, at: int) -> None:
+def _log_spend(conn, label: str, cost_usd: float | None, at: int, model: str | None = None) -> None:
     """Keep a cost in today's total when its output row is replaced or never written."""
     if cost_usd:
         conn.execute(
             "INSERT OR IGNORE INTO outputs (kind, cache_key, prompt_version, content_json, model, cost_usd, created_at) "
             "VALUES (?, ?, ?, '{}', ?, ?, ?)",
-            (SPEND_KIND, f"{label}@{at}", ANSWER_VERSION, config.synthesis_model(), cost_usd, at),
+            (SPEND_KIND, f"{label}@{at}", ANSWER_VERSION, model, cost_usd, at),
         )
 
 
 def ask_prep(conn, question: str, topic_id: int | None = None, retrieve_fn: Callable | None = None,
              synth_fn: Callable | None = None, regenerate: bool = False, now: int | None = None,
-             daily_cap_usd: float = 0.10) -> dict | None:
+             daily_cap_usd: float | None = None, deep: bool = False) -> dict | None:
     """Answer an interview question from the library (retriever + synthesizer, once).
 
     Saved in outputs(kind='prep_answer', cache_key=<lower-cased trimmed question>) with the
     call's cost, so asking again reopens it with 0 calls; only regenerate=True makes a new
     call. Before any new call the daily cap is checked: DailyCapReached is raised instead.
-    Returns {"question", "topic_id", "answer": {...}, "asked_at", "cached"} or None
+    deep=True uses SYNTHESIS_MODEL (Sonnet) for this one answer; otherwise OPENROUTER_MODEL.
+    Returns {"question", "topic_id", "answer": {...}, "asked_at", "model", "deep", "cached"} or None
     when the library has nothing relevant.
     """
     key = question_key(question)
@@ -652,9 +655,7 @@ def ask_prep(conn, question: str, topic_id: int | None = None, retrieve_fn: Call
     if saved and not regenerate:
         saved.pop("_created_at", None)
         return {**saved, "cached": True}
-    spent = spent_today(conn, now)
-    if spent >= daily_cap_usd:
-        raise DailyCapReached(f"Today's API spend (${spent:.2f}) has reached the ${daily_cap_usd:.2f} cap.")
+    check_cap(conn, daily_cap_usd, now)
     if retrieve_fn is None:
         from contentpilot.rag.retriever import retrieve as retrieve_fn
     if synth_fn is None:
@@ -662,22 +663,26 @@ def ask_prep(conn, question: str, topic_id: int | None = None, retrieve_fn: Call
     chunks = retrieve_fn(question.strip())
     if not chunks:
         return None
+    model = config.synthesis_model() if deep else config.openrouter_model()
     try:
-        result = synth_fn(question.strip(), chunks)
+        result = synth_fn(question.strip(), chunks, model=model) if deep else synth_fn(question.strip(), chunks)
     except Exception as exc:
-        _log_spend(conn, f"failed:{key}", getattr(exc, "cost_usd", None), now)
+        _log_spend(conn, f"failed:{key}", getattr(exc, "cost_usd", None), now, model)
         raise
+    model = getattr(result, "model_used", None) or model
     content = {
         "question": " ".join(question.split()),
         "topic_id": topic_id if topic_id is not None else (saved or {}).get("topic_id"),
         "answer": result.model_dump() if hasattr(result, "model_dump") else dict(result),
         "asked_at": now,
+        "model": model,
+        "deep": deep,
     }
     if saved:  # Regenerate replaces the row: keep the earlier call's cost on its own day
-        old = conn.execute("SELECT cost_usd, created_at FROM outputs WHERE kind = ? AND cache_key = ? "
+        old = conn.execute("SELECT cost_usd, created_at, model FROM outputs WHERE kind = ? AND cache_key = ? "
                            "AND prompt_version = ?", (ANSWER_KIND, key, ANSWER_VERSION)).fetchone()
-        _log_spend(conn, f"replaced:{key}", old["cost_usd"], old["created_at"])
-    _store_output(conn, ANSWER_KIND, key, ANSWER_VERSION, content, config.synthesis_model(),
+        _log_spend(conn, f"replaced:{key}", old["cost_usd"], old["created_at"], old["model"])
+    _store_output(conn, ANSWER_KIND, key, ANSWER_VERSION, content, model,
                   getattr(result, "cost_usd", None), now)
     return {**content, "cached": False}
 
@@ -784,9 +789,10 @@ def jobs_archived_count(conn) -> int:
 
 
 def score_jobs(conn, resume: Resume, llm: triage.LLM = triage.openrouter_llm, now: int | None = None,
-               daily_cap_usd: float = 0.10) -> dict:
+               daily_cap_usd: float | None = None) -> dict:
     """Score every listed job that has no fit for this resume version. One call per job, cached."""
     now = _now(now)
+    daily_cap_usd = resolve_cap(conn, daily_cap_usd)
     stats = {"scored": 0, "llm_calls": 0, "cost_usd": 0.0, "errors": 0, "stopped_by_cap": False, "skipped": None}
     if not resume.ok:
         stats["skipped"] = resume.notice

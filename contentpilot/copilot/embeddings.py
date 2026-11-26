@@ -18,7 +18,7 @@ import requests
 
 from contentpilot import config
 from contentpilot.copilot.parsing import body_text, display_title
-from contentpilot.copilot.spend import DEFAULT_DAILY_CAP_USD, check_cap
+from contentpilot.copilot.spend import check_cap
 
 MODEL = config.EMBEDDING_MODEL
 PRICE_PER_MTOK = 0.02          # USD per 1M input tokens for text-embedding-3-small
@@ -141,7 +141,7 @@ def _log_cost(conn, kind: str, key: str, content: dict, tokens: int, now: int) -
 
 
 def embed_pending(conn, embedder: Embedder | None = None, now: int | None = None,
-                  daily_cap_usd: float = DEFAULT_DAILY_CAP_USD, batch_size: int = BATCH_SIZE) -> dict:
+                  daily_cap_usd: float | None = None, batch_size: int = BATCH_SIZE) -> dict:
     """Embed every new or changed post and prep note. Unchanged items cost nothing.
     Stops cleanly at the daily cap. Leaves commit to the caller."""
     embedder = embedder or openai_embedder
@@ -175,7 +175,7 @@ def embed_pending(conn, embedder: Embedder | None = None, now: int | None = None
 
 
 def embed_query(conn, text: str, embedder: Embedder | None = None, now: int | None = None,
-                daily_cap_usd: float = DEFAULT_DAILY_CAP_USD) -> np.ndarray:
+                daily_cap_usd: float | None = None) -> np.ndarray:
     """Vector for a search or question, cached in outputs by its normalised text.
     Raises DailyCapReached before a new call when the cap is reached."""
     norm = " ".join((text or "").split()).lower()

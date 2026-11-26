@@ -229,6 +229,14 @@ _MIGRATIONS = {
             PRIMARY KEY (kind, item_id)
         );
     """,
+    8: """
+        -- All spend in one place: copy past card-extraction costs into outputs,
+        -- dated when they were spent (so today's cap is unaffected).
+        INSERT OR IGNORE INTO outputs (kind, cache_key, prompt_version, content_json, model, cost_usd, created_at)
+        SELECT 'extraction', 'card:' || id || '@' || COALESCE(extracted_at, 0), COALESCE(prompt_version, '?'),
+               '{"backfilled": true}', model, cost_usd, COALESCE(extracted_at, 0)
+        FROM cards WHERE cost_usd IS NOT NULL;
+    """,
 }
 
 

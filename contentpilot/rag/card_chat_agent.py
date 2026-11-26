@@ -56,6 +56,23 @@ def _build_system_prompt(context: dict) -> str:
     )
 
 
+def _log_chat_cost(card_id: int, model: str, payload: dict) -> None:
+    """Card chat has no cached output; log its cost so spent_today() and v3_spend see it."""
+    import time
+
+    from contentpilot.copilot.spend import log_cost
+    from contentpilot.db import get_connection
+
+    cost = (payload.get("usage") or {}).get("cost")
+    conn = get_connection()
+    try:
+        log_cost(conn, "card_chat", f"{card_id}@{time.time_ns()}", payload.get("model") or model, cost,
+                 {"card_id": card_id}, version="card_chat")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def chat(card_id: int, user_message: str, history: list[dict] | None = None) -> str:
     """Sends user_message (with prior turns) to the chat agent, scoped to
     card_id's content. Saves both the user message and the assistant's reply
@@ -90,5 +107,6 @@ def chat(card_id: int, user_message: str, history: list[dict] | None = None) -> 
 
     save_chat_turn(card_id, "user", user_message)
     save_chat_turn(card_id, "assistant", reply)
+    _log_chat_cost(card_id, model, payload)
 
     return reply

@@ -15,14 +15,14 @@ from dotenv import load_dotenv
 
 from contentpilot import config
 from contentpilot.copilot import embeddings
-from contentpilot.copilot.spend import spent_today
+from contentpilot.copilot.spend import get_daily_cap, spent_today
 from contentpilot.db import get_connection
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true", help="estimate only; no API calls, no writes")
-    parser.add_argument("--cap", type=float, default=0.10, help="daily API spend cap in USD (all features)")
+    parser.add_argument("--cap", type=float, default=None, help="daily API spend cap in USD (all features) (default: the api.daily_cap_usd setting, 0.25)")
     args = parser.parse_args()
     load_dotenv()
 
@@ -51,7 +51,8 @@ def main() -> None:
         print(f"Embedded {stats['embedded']} of {stats['pending']} in {stats['calls']} call(s): "
               f"{stats['tokens']:,} tokens, cost ${stats['cost_usd']:.5f}")
         if stats["stopped_by_cap"]:
-            print(f"Stopped at the ${args.cap:.2f} daily cap; run again tomorrow for the rest.")
+            print(f"Stopped at the ${get_daily_cap(conn) if args.cap is None else args.cap:.2f} daily cap; "
+                  "run again tomorrow for the rest.")
         print(f"Spent today (all features): ${before:.4f} -> ${spent_today(conn):.4f}")
         print(f"Now embedded: {embeddings.counts(conn)}")
     finally:

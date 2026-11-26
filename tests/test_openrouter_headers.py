@@ -54,7 +54,10 @@ def test_synthesizer_call(sent):
     assert sent[-1]["headers"] == EXPECTED
 
 
-def test_card_chat_call(sent, monkeypatch):
+def test_card_chat_call(sent, monkeypatch, tmp_path):
+    # Card chat logs its cost to outputs: point the db at a temp file, never the real database.
+    from contentpilot import db
+    monkeypatch.setattr(db, "_DB_PATH", str(tmp_path / "t.sqlite3"))
     from contentpilot.rag import card_chat_agent
     monkeypatch.setattr(card_chat_agent, "get_card_chat_context", lambda cid: {
         "title": "t", "summary": "s", "key_learnings": [], "build_ideas": [], "job_signals": [],

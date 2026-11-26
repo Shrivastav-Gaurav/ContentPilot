@@ -340,25 +340,26 @@ def _payload(content, cost):
 def test_synthesizer_reports_cost_including_retry(monkeypatch):
     from contentpilot.rag import synthesizer
     replies = iter([_payload("not json", 0.01), _payload(_SYNTH_JSON, 0.02)])
-    monkeypatch.setattr(synthesizer, "_call_openrouter", lambda q, c, extra_instruction="": next(replies))
+    monkeypatch.setattr(synthesizer, "_call_openrouter", lambda q, c, extra_instruction="", model=None: next(replies))
     result = synthesizer.synthesize("q", ["chunk"])
     assert result.cost_usd == pytest.approx(0.03)
     assert "cost" not in json.dumps(result.model_dump())             # never saved inside the answer JSON
 
     replies = iter([_payload("bad", 0.01), _payload("still bad", 0.01)])
-    monkeypatch.setattr(synthesizer, "_call_openrouter", lambda q, c, extra_instruction="": next(replies))
+    monkeypatch.setattr(synthesizer, "_call_openrouter", lambda q, c, extra_instruction="", model=None: next(replies))
     with pytest.raises(synthesizer.SynthesisValidationError) as err:
         synthesizer.synthesize("q", ["chunk"])
     assert err.value.cost_usd == pytest.approx(0.02)
 
 
 def test_ask_cost_counts_toward_cap_and_cap_blocks_new_calls(conn, monkeypatch):
-    from contentpilot.copilot import service
+    from contentpilot.copilot import service, spend
     from contentpilot.rag import synthesizer
     service.seed_prep_topics(conn)
+    spend.set_daily_cap(conn, 0.10)                                  # the api.daily_cap_usd setting
     calls = []
 
-    def fake_call(q, c, extra_instruction=""):
+    def fake_call(q, c, extra_instruction="", model=None):
         calls.append(q)
         return _payload(_SYNTH_JSON, 0.06)
     monkeypatch.setattr(synthesizer, "_call_openrouter", fake_call)
@@ -387,7 +388,7 @@ def test_regenerate_and_failures_keep_their_cost_in_todays_spend(conn, monkeypat
     from contentpilot.rag import synthesizer
     replies = iter([_payload(_SYNTH_JSON, 0.02), _payload(_SYNTH_JSON, 0.03),
                     _payload("bad", 0.01), _payload("bad", 0.01)])
-    monkeypatch.setattr(synthesizer, "_call_openrouter", lambda q, c, extra_instruction="": next(replies))
+    monkeypatch.setattr(synthesizer, "_call_openrouter", lambda q, c, extra_instruction="", model=None: next(replies))
     retrieve = lambda q: ["chunk"]  # noqa: E731
     service.ask_prep(conn, "Q", 1, retrieve, synthesizer.synthesize, now=NOW)
     service.ask_prep(conn, "Q", 1, retrieve, synthesizer.synthesize, regenerate=True, now=NOW + 1)

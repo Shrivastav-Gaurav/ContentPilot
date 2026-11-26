@@ -39,7 +39,10 @@ class ExtractionResult(BaseModel):
 
 
 class ExtractionValidationError(ValueError):
-    pass
+    def __init__(self, message: str, cost_usd: float = 0.0, model: str | None = None):
+        super().__init__(message)
+        self.cost_usd = cost_usd  # the failed calls still cost money
+        self.model = model
 
 
 def _strip_json_fences(raw: str) -> str:
@@ -92,6 +95,7 @@ def extract_tpm_lens(content: str, source_id: int | None = None) -> ExtractionRe
         payload = _call_openrouter(content)
         raw = payload["choices"][0]["message"]["content"]
         usage = payload.get("usage", {})
+        cost = float(usage.get("cost") or 0.0)
 
         try:
             parsed = Extraction.model_validate_json(_strip_json_fences(raw))
@@ -104,10 +108,12 @@ def extract_tpm_lens(content: str, source_id: int | None = None) -> ExtractionRe
             payload = _call_openrouter(content, extra_instruction=retry_instruction)
             raw = payload["choices"][0]["message"]["content"]
             usage = payload.get("usage", {})
+            cost += float(usage.get("cost") or 0.0)
             try:
                 parsed = Extraction.model_validate_json(_strip_json_fences(raw))
             except (ValidationError, json.JSONDecodeError) as second_error:
-                raise ExtractionValidationError(str(second_error)) from second_error
+                raise ExtractionValidationError(str(second_error), cost_usd=cost,
+                                                model=config.openrouter_model()) from second_error
 
     return ExtractionResult(
         extraction=parsed,
@@ -115,5 +121,5 @@ def extract_tpm_lens(content: str, source_id: int | None = None) -> ExtractionRe
         model=config.openrouter_model(),
         tokens_in=usage.get("prompt_tokens"),
         tokens_out=usage.get("completion_tokens"),
-        cost_usd=usage.get("cost"),
+        cost_usd=cost if (cost or usage.get("cost") is not None) else None,
     )

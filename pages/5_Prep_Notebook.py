@@ -1,7 +1,7 @@
 """Prep Notebook: interview topics, notes filed from posts, your own stories, saved answers.
 
 Loading this page makes no LLM call and never touches Chroma. Only "Ask" (first time for a
-question) and "Regenerate" call the retriever and synthesizer.
+question), "Regenerate" (Haiku) and "Deeper answer (Sonnet)" call the retriever and synthesizer.
 """
 from datetime import datetime
 
@@ -46,14 +46,14 @@ def save_story(topic_id: int, widget_key: str) -> None:
         _flash("error", f"Could not save it: {exc}")
 
 
-def ask(question: str, topic_id: int, regenerate: bool = False) -> None:
+def ask(question: str, topic_id: int, regenerate: bool = False, deep: bool = False) -> None:
     if not question.strip():
         _flash("warning", "Type a question first.")
         return
     try:
         with st.spinner("Searching your library and writing an answer…"):
             with service.transaction() as conn:
-                res = service.ask_prep(conn, question, topic_id, regenerate=regenerate)
+                res = service.ask_prep(conn, question, topic_id, regenerate=regenerate or deep, deep=deep)
     except service.DailyCapReached as exc:
         _flash("warning", f"{exc} No call was made. Saved answers still open; try again tomorrow.")
         return
@@ -66,6 +66,8 @@ def ask(question: str, topic_id: int, regenerate: bool = False) -> None:
     st.session_state.prep_open_answer = service.question_key(question)
     if res["cached"]:
         _flash("info", "You asked this before. Showing the saved answer (no new call). Use Regenerate for a fresh one.")
+    elif deep:
+        _flash("success", "Deeper answer (Sonnet) saved in place of the previous one.")
     elif regenerate:
         _flash("success", "Answer regenerated and saved.")
     else:
@@ -75,8 +77,9 @@ def ask(question: str, topic_id: int, regenerate: bool = False) -> None:
 def render_answer(a: dict) -> None:
     ans = a["answer"]
     asked = datetime.fromtimestamp(a.get("asked_at") or a.get("saved_at") or 0)
+    model = (a.get("model") or "").split("/")[-1]
     st.caption(f"{CONFIDENCE.get(ans.get('confidence'), '⚪')} Confidence: {ans.get('confidence', '?')} · "
-               f"saved {asked:%b} {asked.day}")
+               f"saved {asked:%b} {asked.day}" + (f" · {model}" if model else ""))
     st.markdown(ans["answer"].replace("$", r"\$"))
     if ans.get("key_points"):
         st.markdown("**Key points**")
@@ -148,8 +151,12 @@ if answers:
         is_open = st.session_state.prep_open_answer == a["key"]
         with st.expander(a["question"], expanded=is_open):
             render_answer(a)
-            st.button("Regenerate", key=f"regen_{a['key']}", on_click=ask, args=(a["question"], topic["id"], True),
-                      help="Makes one new call and replaces this saved answer.")
+            c1, c2 = st.columns(2)
+            c1.button("Regenerate", key=f"regen_{a['key']}", on_click=ask, args=(a["question"], topic["id"], True),
+                      help="One new Haiku call; replaces this saved answer.", width="stretch")
+            c2.button("Deeper answer (Sonnet)", key=f"deep_{a['key']}", on_click=ask,
+                      args=(a["question"], topic["id"], True, True), width="stretch",
+                      help="One Sonnet call (several times the cost of Haiku); replaces this saved answer.")
 
 st.subheader("Notes")
 if not notes:
