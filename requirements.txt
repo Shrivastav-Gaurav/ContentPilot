@@ -9,3 +9,4 @@ playwright
 apscheduler
 langsmith
 python-docx
+numpy

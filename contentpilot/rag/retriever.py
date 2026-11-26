@@ -1,10 +1,10 @@
-"""Hybrid retrieval over ingested cards: semantic search (ChromaDB, cosine)
-merged with lexical search (SQLite FTS5), deduplicated by card_id.
+"""Retrieval for Ask (Prep Notebook answers).
 
-Chroma is optional. When chromadb is not installed, or CONTENTPILOT_SEARCH=fts,
-retrieve() searches posts_fts (saved posts) plus prep_notes (filed notes and your
-own stories) with SQLite FTS5 and bm25 instead, returning the same RetrievedChunk
-shape so the synthesizer works unchanged.
+Default (no Chroma): hybrid retrieval. Stored OpenAI embeddings (cosine, numpy) plus
+SQLite FTS5 bm25 over saved posts and prep notes, merged by reciprocal rank fusion.
+With no stored vectors, no OPENAI_API_KEY, or CONTENTPILOT_SEARCH=fts, it is FTS only.
+CONTENTPILOT_SEARCH=chroma keeps the original Chroma + cards_fts path. Every path
+returns the same RetrievedChunk shape, so the synthesizer works unchanged.
 """
 import importlib.util
 import os
@@ -142,8 +142,8 @@ _POSTS_WEIGHTS = "0.0, 2.0, 0.3, 1.0, 1.5, 1.5"
 
 
 def use_fts_only() -> bool:
-    """True when CONTENTPILOT_SEARCH=fts or chromadb is not installed."""
-    if os.environ.get("CONTENTPILOT_SEARCH", "").strip().lower() == "fts":
+    """True unless the legacy Chroma path is chosen (CONTENTPILOT_SEARCH=chroma) and installed."""
+    if os.environ.get("CONTENTPILOT_SEARCH", "").strip().lower() != "chroma":
         return True
     return importlib.util.find_spec("chromadb") is None
 
@@ -165,6 +165,60 @@ def _bm25_to_distance(scores: list[float]) -> list[float]:
     return [(sc - best) / span for sc in scores]
 
 
+def _fts_posts(conn, query: str, k: int) -> list[tuple[int, float]]:
+    return [(int(r[0]), r[1]) for r in conn.execute(
+        f"SELECT source_id, bm25(posts_fts, {_POSTS_WEIGHTS}) AS score FROM posts_fts "
+        "WHERE posts_fts MATCH ? ORDER BY score LIMIT ?", (query, k))]
+
+
+def _fts_notes(conn, query: str, k: int) -> list[tuple[int, float]]:
+    # prep_notes has no index of its own: build a throwaway one (it is small).
+    conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS temp.prep_fts USING fts5("
+                 "note_id UNINDEXED, text, tokenize = 'unicode61 remove_diacritics 2')")
+    conn.execute("DELETE FROM temp.prep_fts")
+    conn.execute("INSERT INTO temp.prep_fts (note_id, text) SELECT n.id, t.name || ' ' || n.text "
+                 "FROM prep_notes n JOIN prep_topics t ON t.id = n.topic_id")
+    return [(int(r[0]), r[1]) for r in conn.execute(
+        "SELECT note_id, bm25(prep_fts) AS score FROM temp.prep_fts WHERE prep_fts MATCH ? ORDER BY score LIMIT ?",
+        (query, k))]
+
+
+def _post_hit(conn, source_id: int) -> dict | None:
+    r = conn.execute(
+        "SELECT s.id, s.title, s.canonical_url, s.raw_text, a.name AS author, ps.summary FROM sources s "
+        "LEFT JOIN authors a ON a.id = s.author_id LEFT JOIN post_state ps ON ps.source_id = s.id WHERE s.id = ?",
+        (source_id,)).fetchone()
+    if r is None:
+        return None
+    text = body_text(r["raw_text"])[:_BODY_CHARS]
+    if r["summary"]:
+        text = f"Summary: {r['summary']}\n\n{text}"
+    return {"card_id": int(r["id"]), "title": r["title"], "author": r["author"],
+            "url": r["canonical_url"] or "", "text": text}
+
+
+def _note_hit(conn, note_id: int) -> dict | None:
+    r = conn.execute(
+        "SELECT n.id, n.text, n.source_id, t.name AS topic, s.title, s.canonical_url, a.name AS author "
+        "FROM prep_notes n JOIN prep_topics t ON t.id = n.topic_id LEFT JOIN sources s ON s.id = n.source_id "
+        "LEFT JOIN authors a ON a.id = s.author_id WHERE n.id = ?", (note_id,)).fetchone()
+    if r is None:
+        return None
+    mine = r["source_id"] is None
+    return {
+        "card_id": -int(r["id"]) if mine else int(r["source_id"]),
+        "title": f"My story: {r['topic']}" if mine else f"Prep note ({r['topic']}): {r['title'] or ''}",
+        "author": "You" if mine else r["author"],
+        "url": "" if mine else (r["canonical_url"] or ""),
+        "text": r["text"],
+    }
+
+
+def _chunks(hits: list[dict], distances: list[float]) -> list[RetrievedChunk]:
+    return [RetrievedChunk(card_id=h["card_id"], source_title=h["title"], author_name=h["author"],
+                           chunk_text=h["text"], distance=d, url=h["url"]) for h, d in zip(hits, distances)]
+
+
 def retrieve_fts(query_text: str, top_k: int = DEFAULT_TOP_K) -> list[RetrievedChunk]:
     """Top posts and prep notes by bm25. card_id holds the source id for posts and
     -<note id> for your own stories (no card behind them)."""
@@ -173,51 +227,80 @@ def retrieve_fts(query_text: str, top_k: int = DEFAULT_TOP_K) -> list[RetrievedC
         return []
     conn = get_connection()
     try:
-        hits = []
-        for r in conn.execute(
-            f"SELECT f.source_id, bm25(posts_fts, {_POSTS_WEIGHTS}) AS score, s.title, s.canonical_url, s.raw_text, "
-            "a.name AS author, ps.summary FROM posts_fts f JOIN sources s ON s.id = f.source_id "
-            "LEFT JOIN authors a ON a.id = s.author_id LEFT JOIN post_state ps ON ps.source_id = s.id "
-            "WHERE posts_fts MATCH ? ORDER BY score LIMIT ?", (query, top_k),
-        ):
-            text = body_text(r["raw_text"])[:_BODY_CHARS]
-            if r["summary"]:
-                text = f"Summary: {r['summary']}\n\n{text}"
-            hits.append({"score": r["score"], "card_id": int(r["source_id"]), "title": r["title"],
-                         "author": r["author"], "url": r["canonical_url"] or "", "text": text})
-
-        # prep_notes has no index of its own: build a throwaway one (it is small).
-        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS temp.prep_fts USING fts5("
-                     "note_id UNINDEXED, text, tokenize = 'unicode61 remove_diacritics 2')")
-        conn.execute("DELETE FROM temp.prep_fts")
-        conn.execute("INSERT INTO temp.prep_fts (note_id, text) SELECT n.id, t.name || ' ' || n.text "
-                     "FROM prep_notes n JOIN prep_topics t ON t.id = n.topic_id")
-        for r in conn.execute(
-            "SELECT p.note_id, bm25(prep_fts) AS score, n.text, n.source_id, t.name AS topic, "
-            "s.title, s.canonical_url, a.name AS author FROM temp.prep_fts p "
-            "JOIN prep_notes n ON n.id = p.note_id JOIN prep_topics t ON t.id = n.topic_id "
-            "LEFT JOIN sources s ON s.id = n.source_id LEFT JOIN authors a ON a.id = s.author_id "
-            "WHERE prep_fts MATCH ? ORDER BY score LIMIT ?", (query, top_k),
-        ):
-            mine = r["source_id"] is None
-            hits.append({
-                "score": r["score"],
-                "card_id": -int(r["note_id"]) if mine else int(r["source_id"]),
-                "title": f"My story: {r['topic']}" if mine else f"Prep note ({r['topic']}): {r['title'] or ''}",
-                "author": "You" if mine else r["author"],
-                "url": "" if mine else (r["canonical_url"] or ""),
-                "text": r["text"],
-            })
+        scored = [(sc, _post_hit(conn, i)) for i, sc in _fts_posts(conn, query, top_k)]
+        scored += [(sc, _note_hit(conn, i)) for i, sc in _fts_notes(conn, query, top_k)]
     finally:
         conn.close()
+    scored = sorted([x for x in scored if x[1]], key=lambda x: x[0])[:top_k]
+    return _chunks([h for _, h in scored], _bm25_to_distance([sc for sc, _ in scored]))
 
-    hits.sort(key=lambda h: h["score"])
-    hits = hits[:top_k]
-    return [
-        RetrievedChunk(card_id=h["card_id"], source_title=h["title"], author_name=h["author"],
-                       chunk_text=h["text"], distance=d, url=h["url"])
-        for h, d in zip(hits, _bm25_to_distance([h["score"] for h in hits]))
-    ]
+
+# --- hybrid: stored embeddings (cosine) + FTS (bm25), merged by rank ---------------------
+
+_RRF_K = 60          # reciprocal rank fusion constant: score = sum(1 / (K + rank))
+_CANDIDATES = 20     # how deep each ranked list goes before fusion
+
+
+def fuse_ranks(lists: list, k: int = _RRF_K) -> list[tuple[tuple[str, int], float]]:
+    """Weighted reciprocal rank fusion: score = sum(weight / (k + rank)).
+
+    Each entry is a ranked list of keys, or (ranked list, weight). Items high in several
+    lists win; ties keep first-seen order."""
+    scores: dict[tuple[str, int], float] = {}
+    for entry in lists:
+        ranked, weight = entry if isinstance(entry, tuple) else (entry, 1.0)
+        for rank, key in enumerate(ranked, start=1):
+            scores[key] = scores.get(key, 0.0) + weight / (k + rank)
+    return sorted(scores.items(), key=lambda kv: -kv[1])
+
+
+def retrieve_hybrid(query_text: str, top_k: int = DEFAULT_TOP_K, embedder=None,
+                    now: int | None = None) -> list[RetrievedChunk] | None:
+    """Meaning (cosine over stored vectors) + keywords (bm25), fused by rank.
+
+    Returns None when hybrid can't run (no stored vectors, no OPENAI_API_KEY, API error,
+    or the daily cap) so the caller falls back to FTS only. New or changed posts and
+    notes are embedded first, so the index stays current; costs go to outputs.
+    """
+    from contentpilot.copilot import embeddings
+
+    conn = get_connection()
+    try:
+        if not embeddings.has_embeddings(conn) or (embedder is None and not embeddings.enabled()):
+            return None
+        try:
+            embeddings.embed_pending(conn, embedder=embedder, now=now)
+            qvec = embeddings.embed_query(conn, query_text, embedder=embedder, now=now)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            return None
+        # Meaning: ONE list over posts and notes. Cosine scores share a scale, so a post that
+        # is merely the least-bad post can't take first place the way it would in a posts-only list.
+        semantic = sorted(
+            [(sim, ("post", i)) for i, sim in embeddings.rank(conn, "post", qvec, _CANDIDATES)]
+            + [(sim, ("note", i)) for i, sim in embeddings.rank(conn, "prep_note", qvec, _CANDIDATES)],
+            key=lambda x: -x[0])[:_CANDIDATES]
+        lists = [([key for _, key in semantic], 1.0)]
+        # Keywords: two lists, because bm25 from the big posts index and the tiny notes index
+        # are not comparable. Half weight each, so keywords as a whole count as much as meaning.
+        query = _or_query(query_text)
+        if query:
+            lists.append(([("post", i) for i, _ in _fts_posts(conn, query, _CANDIDATES)], 0.5))
+            lists.append(([("note", i) for i, _ in _fts_notes(conn, query, _CANDIDATES)], 0.5))
+        fused = []
+        for (kind, item_id), score in fuse_ranks(lists):
+            hit = _post_hit(conn, item_id) if kind == "post" else _note_hit(conn, item_id)
+            if hit:
+                fused.append((score, hit))
+            if len(fused) == top_k:
+                break
+    finally:
+        conn.close()
+    if not fused:
+        return []
+    best = fused[0][0]
+    return _chunks([h for _, h in fused], [1.0 - sc / best for sc, _ in fused])
 
 
 def retrieve(
@@ -225,7 +308,14 @@ def retrieve(
     top_k: int = DEFAULT_TOP_K,
     filter_topics: list[str] | None = None,
 ) -> list[RetrievedChunk]:
+    """Hybrid (embeddings + FTS) when vectors exist, else FTS only.
+    CONTENTPILOT_SEARCH=fts forces FTS; CONTENTPILOT_SEARCH=chroma uses the legacy Chroma index."""
+    mode = os.environ.get("CONTENTPILOT_SEARCH", "").strip().lower()
     if use_fts_only():
+        if mode != "fts":
+            chunks = retrieve_hybrid(query_text, top_k)
+            if chunks is not None:
+                return chunks
         return retrieve_fts(query_text, top_k)
     semantic_hits = _semantic_search(query_text, top_k, filter_topics)
     fts_hits = _fts_search(query_text, top_k)

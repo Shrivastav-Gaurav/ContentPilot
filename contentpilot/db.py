@@ -215,6 +215,20 @@ _MIGRATIONS = {
             tokenize = 'unicode61 remove_diacritics 2'
         );
     """,
+    7: """
+        -- Meaning-based search without Chroma: one vector per post or prep note.
+        -- kind = 'post' (item_id = sources.id) or 'prep_note' (item_id = prep_notes.id).
+        CREATE TABLE embeddings (
+            kind TEXT NOT NULL CHECK (kind IN ('post', 'prep_note')),
+            item_id INTEGER NOT NULL,
+            model TEXT NOT NULL,
+            dim INTEGER NOT NULL,
+            vector BLOB NOT NULL,
+            text_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (kind, item_id)
+        );
+    """,
 }
 
 

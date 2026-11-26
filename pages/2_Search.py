@@ -1,4 +1,5 @@
-"""Search every saved post, any status. No API calls."""
+"""Search every saved post, any status. Keyword search makes no API calls; "Search by meaning"
+embeds the query once (cached) using the stored post vectors."""
 import time
 
 import streamlit as st
@@ -27,6 +28,14 @@ def do_move_to_inbox(source_id: int, title: str) -> None:
 
 text = st.text_input("Search", placeholder="keyword, phrase or publisher", label_visibility="collapsed")
 
+with service.transaction() as conn:
+    meaning_ready = search.meaning_search_ready(conn)
+by_meaning = st.toggle(
+    "Search by meaning", key="by_meaning", disabled=not meaning_ready,
+    help=("Finds posts about the same idea even when the words differ. One tiny embedding call per new search."
+          if meaning_ready else
+          "Needs OPENAI_API_KEY in .env and stored vectors: run python -m scripts.embed_backfill once."))
+
 STATUSES = {"Any": None, "Open": "open", "Actioned": "actioned", "Archived": "archived", "Dismissed": "dismissed"}
 TYPES = {"Any": None, **{label: key for key, label in TYPE_LABELS.items()}}
 PUBLISHED = ("Any", "Last 30 days", "Last 90 days", "This year")
@@ -53,14 +62,27 @@ if st.session_state.search_flash:
     getattr(st, kind)(msg.replace("$", r"\$"))  # "$" pairs would render as LaTeX
     st.session_state.search_flash = None
 
-with service.transaction() as conn:
-    results = search.search(
-        conn, text=text, status=STATUSES[status], post_type=TYPES[post_type],
-        published_since=since, source_type=None if source == "Any" else source, limit=50,
-    )
+meaning = by_meaning and meaning_ready and bool(text.strip())
+try:
+    with service.transaction() as conn:
+        results = search.search(
+            conn, text=text, status=STATUSES[status], post_type=TYPES[post_type],
+            published_since=since, source_type=None if source == "Any" else source, limit=50,
+            by_meaning=meaning,
+        )
+except Exception as exc:  # cap reached or the embeddings API failed: fall back to keywords
+    reason = str(exc) if isinstance(exc, service.DailyCapReached) else f"The embeddings call failed ({type(exc).__name__})."
+    st.warning(f"{reason} Showing keyword results instead.".replace("$", r"\$"))
+    meaning = False
+    with service.transaction() as conn:
+        results = search.search(
+            conn, text=text, status=STATUSES[status], post_type=TYPES[post_type],
+            published_since=since, source_type=None if source == "Any" else source, limit=50,
+        )
 
 filtered = bool(text.strip()) or any(v != "Any" for v in (status, post_type, published, source))
-st.caption(f"{len(results)} result{'s' if len(results) != 1 else ''}" + ("" if filtered else " · latest saved posts")
+st.caption(f"{len(results)} result{'s' if len(results) != 1 else ''}"
+           + (" · closest in meaning first" if meaning else "") + ("" if filtered else " · latest saved posts")
            + (" (showing the first 50)" if len(results) == 50 else ""))
 if not results:
     st.info("No posts match. Try fewer words or set the filters to Any.")
@@ -69,7 +91,8 @@ for r in results:
     with st.container(border=True, key=f"row_{r['id']}"):
         st.markdown(f"{type_badge(r['post_type'])} {status_badge(r['status'])}")
         st.markdown(f"**{md(r['display_title'])}**")
-        st.caption(f"{md(r['publisher'] or 'Unknown publisher')} · {fmt_date(r['published_at'])} · {r['source_type']}")
+        match = f" · {r['similarity']:.0%} match" if "similarity" in r else ""
+        st.caption(f"{md(r['publisher'] or 'Unknown publisher')} · {fmt_date(r['published_at'])} · {r['source_type']}{match}")
         if r["summary"]:
             st.write(md(r["summary"]))
         st.markdown(f"[Open original]({r['canonical_url']})")

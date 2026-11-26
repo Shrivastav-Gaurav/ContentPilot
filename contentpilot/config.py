@@ -41,6 +41,15 @@ def openrouter_model() -> str:
     return os.environ.get(OPENROUTER_MODEL_ENV, DEFAULT_OPENROUTER_MODEL)
 
 
+OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
+EMBEDDING_MODEL = "text-embedding-3-small"
+
+
+def openai_api_key() -> str | None:
+    """Optional: only meaning-based search (embeddings) needs it."""
+    return (os.environ.get("OPENAI_API_KEY") or "").strip() or None
+
+
 def jina_api_key() -> str | None:
     return os.environ.get(JINA_API_KEY_ENV) or None
 

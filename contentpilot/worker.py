@@ -249,6 +249,19 @@ def _run_job(job: dict) -> None:
         _triage_new_sources()
 
 
+def _embed_new_posts(conn) -> None:
+    """Keep meaning-based search current once it has been set up (backfill run, key present)."""
+    from contentpilot.copilot import embeddings
+    try:
+        if embeddings.enabled() and embeddings.has_embeddings(conn):
+            stats = embeddings.embed_pending(conn)
+            conn.commit()
+            print(f"[worker] embedded {stats['embedded']} new post(s)/note(s), ${stats['cost_usd']:.5f}")
+    except Exception as exc:  # search falls back to keywords; never take the worker down
+        conn.rollback()
+        print(f"[worker] embedding after saved scan failed: {type(exc).__name__}")
+
+
 def _triage_new_sources(llm=None) -> dict | None:
     """After a saved scan: fill facts and triage every post that has no state yet.
 
@@ -262,6 +275,7 @@ def _triage_new_sources(llm=None) -> dict | None:
         service.backfill_facts(conn)  # only fills what is missing
         stats = service.run_triage(conn, llm=llm or triage.openrouter_llm)
         conn.commit()
+        _embed_new_posts(conn)
         print(f"[worker] triage after saved scan: {stats}")
         return stats
     except Exception as exc:  # never take the worker down over triage

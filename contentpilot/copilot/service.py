@@ -13,6 +13,7 @@ from typing import Callable
 from contentpilot import config
 from contentpilot.copilot import fit, prep, rules, search, triage
 from contentpilot.copilot.resume import Resume
+from contentpilot.copilot.spend import DailyCapReached, spent_today  # noqa: F401  (re-exported)
 from contentpilot.copilot.resume import load_resume as _load_resume_from
 from contentpilot.copilot.topics import PREP_TOPICS
 from contentpilot.copilot.parsing import (body_text, display_title, parse_published_at, parse_publisher,
@@ -85,10 +86,6 @@ def backfill_facts(conn, source_ids: list[int] | None = None) -> dict:
 
 # --- 2. triage ---------------------------------------------------------------
 
-def spent_today(conn, now: int | None = None) -> float:
-    start = _now(now) - _now(now) % rules.DAY
-    row = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM outputs WHERE created_at >= ?", (start,)).fetchone()
-    return float(row["c"])
 
 
 def _untriaged(conn, only_ids: list[int] | None = None) -> list[dict]:
@@ -624,10 +621,6 @@ def question_key(question: str) -> str:
 
 
 SPEND_KIND = "spend_log"
-
-
-class DailyCapReached(RuntimeError):
-    """Today's API spend has reached the cap; no new call was made."""
 
 
 def _log_spend(conn, label: str, cost_usd: float | None, at: int) -> None:

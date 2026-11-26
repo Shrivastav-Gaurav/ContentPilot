@@ -98,13 +98,34 @@ def search(
     published_since: int | None = None,
     source_type: str | None = None,
     limit: int = 50,
+    by_meaning: bool = False,
+    embedder=None,
+    now: int | None = None,
 ) -> list[dict]:
-    """Search all posts. status: None/'any', 'open', 'actioned' (done/read/parked), 'archived', 'dismissed'."""
+    """Search all posts. status: None/'any', 'open', 'actioned' (done/read/parked), 'archived', 'dismissed'.
+
+    by_meaning=True ranks posts by cosine similarity of stored embeddings to the text
+    (filters still apply) and adds a 'similarity' to each row. It embeds new posts and the
+    query first (cost logged in outputs) and raises DailyCapReached instead of calling
+    when the cap is reached. Leaves commit to the caller.
+    """
     where, params = [], []
-    query = _fts_query(text)
-    if query:
-        where.append("s.id IN (SELECT source_id FROM posts_fts WHERE posts_fts MATCH ?)")
-        params.append(query)
+    ranked: dict[int, tuple[int, float]] = {}
+    if by_meaning and (text or "").strip():
+        from contentpilot.copilot import embeddings
+        embeddings.embed_pending(conn, embedder=embedder, now=now)
+        qvec = embeddings.embed_query(conn, text, embedder=embedder, now=now)
+        hits = embeddings.rank(conn, "post", qvec, top_k=1000)
+        ranked = {item_id: (i, sim) for i, (item_id, sim) in enumerate(hits)}
+        if not ranked:
+            return []
+        where.append(f"s.id IN ({','.join('?' * len(ranked))})")
+        params += list(ranked)
+    else:
+        query = _fts_query(text)
+        if query:
+            where.append("s.id IN (SELECT source_id FROM posts_fts WHERE posts_fts MATCH ?)")
+            params.append(query)
     if status and status != "any":
         group = {"actioned": ("done", "read", "parked")}.get(status, (status,))
         where.append(f"COALESCE(ps.status, 'open') IN ({','.join('?' * len(group))})")
@@ -126,15 +147,28 @@ def search(
         "FROM sources s LEFT JOIN authors a ON a.id = s.author_id "
         "LEFT JOIN post_state ps ON ps.source_id = s.id"
         + (" WHERE " + " AND ".join(where) if where else "")
-        + " ORDER BY COALESCE(s.published_at, s.fetched_at) DESC LIMIT ?"
+        + " ORDER BY COALESCE(s.published_at, s.fetched_at) DESC"
+        + ("" if ranked else " LIMIT ?")
     )
-    params.append(limit)
+    if not ranked:
+        params.append(limit)
     out = []
     for r in conn.execute(sql, params):
         d = dict(r)
         d["display_title"] = display_title(d["title"], d["summary"], d["publisher"])
+        if ranked:
+            d["similarity"] = ranked[d["id"]][1]
         out.append(d)
+    if ranked:
+        out.sort(key=lambda d: ranked[d["id"]][0])
+        out = out[:limit]
     return out
+
+
+def meaning_search_ready(conn) -> bool:
+    """Search by meaning needs stored vectors and an OPENAI_API_KEY for the query."""
+    from contentpilot.copilot import embeddings
+    return embeddings.enabled() and embeddings.has_embeddings(conn)
 
 
 def source_types(conn) -> list[str]:
