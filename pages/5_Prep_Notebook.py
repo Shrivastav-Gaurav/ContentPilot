@@ -54,6 +54,9 @@ def ask(question: str, topic_id: int, regenerate: bool = False) -> None:
         with st.spinner("Searching your library and writing an answer…"):
             with service.transaction() as conn:
                 res = service.ask_prep(conn, question, topic_id, regenerate=regenerate)
+    except service.DailyCapReached as exc:
+        _flash("warning", f"{exc} No call was made. Saved answers still open; try again tomorrow.")
+        return
     except Exception as exc:
         _flash("error", f"Could not answer: {exc}")
         return
@@ -102,7 +105,7 @@ with service.transaction() as conn:
 
 if st.session_state.prep_flash:
     kind, text = st.session_state.prep_flash
-    getattr(st, kind)(text)
+    getattr(st, kind)(text.replace("$", r"\$"))  # "$0.10 … $0.25" would render as LaTeX
     st.session_state.prep_flash = None
 
 # --- topic list -----------------------------------------------------------------------------

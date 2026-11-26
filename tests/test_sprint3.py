@@ -325,3 +325,115 @@ def test_llm_json_with_literal_newlines_in_strings_parses():
         return '{"topics": ["AI and ML for TPMs"], "notes": ["one\nline", "two"], "use_when": "Use it in an answer when x"}', {}
     note, _ = call_json(llm, "s", "u", PrepNote)
     assert note.notes[0] == "one\nline" and len(calls) == 1          # no retry needed
+
+
+# --- Sprint 3.1 ----------------------------------------------------------------------------
+
+_SYNTH_JSON = ('{"answer": "Use a rollback plan.", "key_points": ["k"], "follow_up_questions": ["f"], '
+               '"sources_used": [], "confidence": "low", "gaps": []}')
+
+
+def _payload(content, cost):
+    return {"choices": [{"message": {"content": content}}], "usage": {"cost": cost}}
+
+
+def test_synthesizer_reports_cost_including_retry(monkeypatch):
+    from contentpilot.rag import synthesizer
+    replies = iter([_payload("not json", 0.01), _payload(_SYNTH_JSON, 0.02)])
+    monkeypatch.setattr(synthesizer, "_call_openrouter", lambda q, c, extra_instruction="": next(replies))
+    result = synthesizer.synthesize("q", ["chunk"])
+    assert result.cost_usd == pytest.approx(0.03)
+    assert "cost" not in json.dumps(result.model_dump())             # never saved inside the answer JSON
+
+    replies = iter([_payload("bad", 0.01), _payload("still bad", 0.01)])
+    monkeypatch.setattr(synthesizer, "_call_openrouter", lambda q, c, extra_instruction="": next(replies))
+    with pytest.raises(synthesizer.SynthesisValidationError) as err:
+        synthesizer.synthesize("q", ["chunk"])
+    assert err.value.cost_usd == pytest.approx(0.02)
+
+
+def test_ask_cost_counts_toward_cap_and_cap_blocks_new_calls(conn, monkeypatch):
+    from contentpilot.copilot import service
+    from contentpilot.rag import synthesizer
+    service.seed_prep_topics(conn)
+    calls = []
+
+    def fake_call(q, c, extra_instruction=""):
+        calls.append(q)
+        return _payload(_SYNTH_JSON, 0.06)
+    monkeypatch.setattr(synthesizer, "_call_openrouter", fake_call)
+    retrieve = lambda q: ["chunk"]  # noqa: E731
+
+    service.ask_prep(conn, "First question", 1, retrieve, synthesizer.synthesize, now=NOW)
+    row = conn.execute("SELECT cost_usd FROM outputs WHERE kind = 'prep_answer'").fetchone()
+    assert row["cost_usd"] == pytest.approx(0.06)
+    assert service.spent_today(conn, NOW) == pytest.approx(0.06)
+
+    service.ask_prep(conn, "Second question", 1, retrieve, synthesizer.synthesize, now=NOW + 1)
+    assert service.spent_today(conn, NOW + 1) == pytest.approx(0.12) and len(calls) == 2
+
+    # Over the $0.10 cap: no new Ask, no Regenerate...
+    with pytest.raises(service.DailyCapReached):
+        service.ask_prep(conn, "Third question", 1, retrieve, synthesizer.synthesize, now=NOW + 2)
+    with pytest.raises(service.DailyCapReached):
+        service.ask_prep(conn, "First question", 1, retrieve, synthesizer.synthesize, regenerate=True, now=NOW + 2)
+    assert len(calls) == 2
+    # ...but saved answers still open.
+    assert service.ask_prep(conn, "first question", None, retrieve, synthesizer.synthesize, now=NOW + 2)["cached"]
+
+
+def test_regenerate_and_failures_keep_their_cost_in_todays_spend(conn, monkeypatch):
+    from contentpilot.copilot import service
+    from contentpilot.rag import synthesizer
+    replies = iter([_payload(_SYNTH_JSON, 0.02), _payload(_SYNTH_JSON, 0.03),
+                    _payload("bad", 0.01), _payload("bad", 0.01)])
+    monkeypatch.setattr(synthesizer, "_call_openrouter", lambda q, c, extra_instruction="": next(replies))
+    retrieve = lambda q: ["chunk"]  # noqa: E731
+    service.ask_prep(conn, "Q", 1, retrieve, synthesizer.synthesize, now=NOW)
+    service.ask_prep(conn, "Q", 1, retrieve, synthesizer.synthesize, regenerate=True, now=NOW + 1)
+    assert service.spent_today(conn, NOW + 1) == pytest.approx(0.05)       # replaced call still counted
+    with pytest.raises(synthesizer.SynthesisValidationError):
+        service.ask_prep(conn, "Other", 1, retrieve, synthesizer.synthesize, now=NOW + 2)
+    assert service.spent_today(conn, NOW + 2) == pytest.approx(0.07)       # failed calls counted too
+    assert len(service.list_prep_answers(conn, 1)) == 1
+
+
+def test_retriever_fts_path_without_chroma(conn, monkeypatch):
+    from contentpilot.copilot import service
+    from contentpilot.rag import retriever, synthesizer
+    _triaged(conn)
+    service.seed_prep_topics(conn)
+    tid = {t["name"]: t["id"] for t in service.list_prep_topics(conn)}["Incident management and postmortems"]
+    service.add_story(conn, tid, "Reranking outage: rolled back the retrieval change in 20 minutes.", now=NOW)
+    conn.commit()
+
+    monkeypatch.setenv("CONTENTPILOT_SEARCH", "fts")
+    assert retriever.use_fts_only()
+    monkeypatch.setattr(retriever, "_semantic_search", lambda *a, **k: pytest.fail("Chroma must not be used"))
+    chunks = retriever.retrieve("How would you explain hybrid retrieval and reranking?")
+    assert chunks and all(isinstance(c, retriever.RetrievedChunk) for c in chunks)
+    by_url = {c.url: c for c in chunks}
+    assert "https://li/3" in by_url and "Hybrid retrieval" in by_url["https://li/3"].chunk_text
+    story = [c for c in chunks if c.author_name == "You"]
+    assert story and story[0].source_title == "My story: Incident management and postmortems" and story[0].card_id < 0
+    assert all(0.0 <= c.distance <= 1.0 for c in chunks) and len(chunks) <= 8
+    assert synthesizer._format_sources(chunks)                           # the shape the synthesizer expects
+    assert retriever.retrieve("how would you") == []                     # only question words: nothing to search
+
+    # chromadb missing behaves the same as CONTENTPILOT_SEARCH=fts.
+    monkeypatch.delenv("CONTENTPILOT_SEARCH")
+    monkeypatch.setattr(retriever.importlib.util, "find_spec", lambda name: None)
+    assert retriever.use_fts_only()
+
+
+def test_older_jobs_listed_separately(conn):
+    from contentpilot.copilot import service
+    _triaged(conn)
+    conn.execute("UPDATE post_state SET post_type = 'job', status = 'open' WHERE source_id IN (3, 5)")
+    conn.execute("UPDATE sources SET published_at = ? WHERE id = 3", (NOW - 70 * DAY,))   # 60-90 days: older
+    conn.execute("UPDATE sources SET published_at = ? WHERE id = 5", (NOW - 95 * DAY,))   # past 90: not listed
+    older = service.list_older_jobs(conn, NOW)
+    assert [o["source_id"] for o in older] == [3] and older[0]["age_days"] == 70
+    assert 3 not in [j["source_id"] for j in service.list_jobs(conn, None, NOW)]
+    service.record_action(conn, 3, "archive", now=NOW)
+    assert service.list_older_jobs(conn, NOW) == []

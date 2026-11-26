@@ -32,7 +32,7 @@ action = st.selectbox("Action", ["All"] + action_types,
 
 if st.session_state.done_flash:
     kind, msg = st.session_state.done_flash
-    getattr(st, kind)(msg)
+    getattr(st, kind)(msg.replace("$", r"\$"))  # "$" pairs would render as LaTeX
     st.session_state.done_flash = None
 
 with service.transaction() as conn:

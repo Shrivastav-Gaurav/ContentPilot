@@ -623,22 +623,45 @@ def question_key(question: str) -> str:
     return " ".join((question or "").split()).lower()
 
 
+SPEND_KIND = "spend_log"
+
+
+class DailyCapReached(RuntimeError):
+    """Today's API spend has reached the cap; no new call was made."""
+
+
+def _log_spend(conn, label: str, cost_usd: float | None, at: int) -> None:
+    """Keep a cost in today's total when its output row is replaced or never written."""
+    if cost_usd:
+        conn.execute(
+            "INSERT OR IGNORE INTO outputs (kind, cache_key, prompt_version, content_json, model, cost_usd, created_at) "
+            "VALUES (?, ?, ?, '{}', ?, ?, ?)",
+            (SPEND_KIND, f"{label}@{at}", ANSWER_VERSION, config.synthesis_model(), cost_usd, at),
+        )
+
+
 def ask_prep(conn, question: str, topic_id: int | None = None, retrieve_fn: Callable | None = None,
-             synth_fn: Callable | None = None, regenerate: bool = False, now: int | None = None) -> dict | None:
+             synth_fn: Callable | None = None, regenerate: bool = False, now: int | None = None,
+             daily_cap_usd: float = 0.10) -> dict | None:
     """Answer an interview question from the library (retriever + synthesizer, once).
 
-    Saved in outputs(kind='prep_answer', cache_key=<lower-cased trimmed question>), so
-    asking again reopens it with 0 calls; only regenerate=True makes a new call.
+    Saved in outputs(kind='prep_answer', cache_key=<lower-cased trimmed question>) with the
+    call's cost, so asking again reopens it with 0 calls; only regenerate=True makes a new
+    call. Before any new call the daily cap is checked: DailyCapReached is raised instead.
     Returns {"question", "topic_id", "answer": {...}, "asked_at", "cached"} or None
     when the library has nothing relevant.
     """
     key = question_key(question)
     if not key:
         raise ValueError("question is empty")
+    now = _now(now)
     saved = _load_output(conn, ANSWER_KIND, key, ANSWER_VERSION)
     if saved and not regenerate:
         saved.pop("_created_at", None)
         return {**saved, "cached": True}
+    spent = spent_today(conn, now)
+    if spent >= daily_cap_usd:
+        raise DailyCapReached(f"Today's API spend (${spent:.2f}) has reached the ${daily_cap_usd:.2f} cap.")
     if retrieve_fn is None:
         from contentpilot.rag.retriever import retrieve as retrieve_fn
     if synth_fn is None:
@@ -646,15 +669,23 @@ def ask_prep(conn, question: str, topic_id: int | None = None, retrieve_fn: Call
     chunks = retrieve_fn(question.strip())
     if not chunks:
         return None
-    result = synth_fn(question.strip(), chunks)
-    now = _now(now)
+    try:
+        result = synth_fn(question.strip(), chunks)
+    except Exception as exc:
+        _log_spend(conn, f"failed:{key}", getattr(exc, "cost_usd", None), now)
+        raise
     content = {
         "question": " ".join(question.split()),
         "topic_id": topic_id if topic_id is not None else (saved or {}).get("topic_id"),
         "answer": result.model_dump() if hasattr(result, "model_dump") else dict(result),
         "asked_at": now,
     }
-    _store_output(conn, ANSWER_KIND, key, ANSWER_VERSION, content, config.synthesis_model(), None, now)
+    if saved:  # Regenerate replaces the row: keep the earlier call's cost on its own day
+        old = conn.execute("SELECT cost_usd, created_at FROM outputs WHERE kind = ? AND cache_key = ? "
+                           "AND prompt_version = ?", (ANSWER_KIND, key, ANSWER_VERSION)).fetchone()
+        _log_spend(conn, f"replaced:{key}", old["cost_usd"], old["created_at"])
+    _store_output(conn, ANSWER_KIND, key, ANSWER_VERSION, content, config.synthesis_model(),
+                  getattr(result, "cost_usd", None), now)
     return {**content, "cached": False}
 
 
@@ -730,6 +761,28 @@ def list_jobs(conn, resume_hash: str | None, now: int | None = None) -> list[dic
             j["apply_this_week"] = True
             flagged += 1
     return jobs
+
+
+def list_older_jobs(conn, now: int | None = None) -> list[dict]:
+    """Open job posts published between job_rank_max_age and job_archive_age days ago
+    (60-90 by default): too old to rank or score, not yet auto-archived."""
+    now = _now(now)
+    r = {**rules.DEFAULT_RULES, **load_rules(conn)}
+    rows = conn.execute(
+        "SELECT ps.source_id, ps.summary, ps.role_title, s.title, s.canonical_url, s.published_at, "
+        "a.name AS publisher FROM post_state ps JOIN sources s ON s.id = ps.source_id "
+        "LEFT JOIN authors a ON a.id = s.author_id "
+        "WHERE ps.post_type = 'job' AND ps.status = 'open' AND s.published_at IS NOT NULL "
+        "AND s.published_at < ? AND s.published_at >= ? ORDER BY s.published_at DESC",
+        (now - r["job_rank_max_age"] * rules.DAY, now - r["job_archive_age"] * rules.DAY),
+    ).fetchall()
+    out = []
+    for row in rows:
+        d = dict(row)
+        d["display_title"] = display_title(d["title"], d["summary"], d["publisher"])
+        d["age_days"] = (now - d["published_at"]) // rules.DAY
+        out.append(d)
+    return out
 
 
 def jobs_archived_count(conn) -> int:

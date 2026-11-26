@@ -139,7 +139,7 @@ with st.expander("Scan LinkedIn Saved"):
 
 if st.session_state.flash:
     kind, text = st.session_state.flash
-    getattr(st, kind)(text)
+    getattr(st, kind)(text.replace("$", r"\$"))  # "$0.10 … $0.25" would render as LaTeX
     st.session_state.flash = None
 
 # --- List --------------------------------------------------------------------------

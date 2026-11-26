@@ -1,8 +1,17 @@
 """Hybrid retrieval over ingested cards: semantic search (ChromaDB, cosine)
 merged with lexical search (SQLite FTS5), deduplicated by card_id.
+
+Chroma is optional. When chromadb is not installed, or CONTENTPILOT_SEARCH=fts,
+retrieve() searches posts_fts (saved posts) plus prep_notes (filed notes and your
+own stories) with SQLite FTS5 and bm25 instead, returning the same RetrievedChunk
+shape so the synthesizer works unchanged.
 """
+import importlib.util
+import os
+import re
 from dataclasses import dataclass
 
+from contentpilot.copilot.parsing import body_text
 from contentpilot.db import get_connection
 from contentpilot.storage import _get_chroma_collection
 
@@ -119,11 +128,105 @@ def _fts_search(query_text: str, top_k: int) -> list[dict]:
     ]
 
 
+# --- FTS-only path (no Chroma) ---------------------------------------------------
+
+_WORD_RE = re.compile(r"[\w][\w'’-]*", re.UNICODE)
+# Question words carry no topic signal; with OR-matching they would match everything.
+_STOPWORDS = set("""a an and are as at be but by can could did do does for from had has have how i if in into
+is it its me my not of on or our should so than that the their them then there these they this to
+us was we were what when where which who why will with would you your tell about give example time get""".split())
+_BODY_CHARS = 1500
+# bm25 column weights for posts_fts(source_id, title, publisher, body, topics, notes):
+# a publisher named "System Design Roadmap" should not outrank posts about roadmaps.
+_POSTS_WEIGHTS = "0.0, 2.0, 0.3, 1.0, 1.5, 1.5"
+
+
+def use_fts_only() -> bool:
+    """True when CONTENTPILOT_SEARCH=fts or chromadb is not installed."""
+    if os.environ.get("CONTENTPILOT_SEARCH", "").strip().lower() == "fts":
+        return True
+    return importlib.util.find_spec("chromadb") is None
+
+
+def _or_query(text: str) -> str | None:
+    """Any meaningful word may match (bm25 ranks posts that match more of them higher)."""
+    words = [w for w in _WORD_RE.findall(text or "") if w.lower() not in _STOPWORDS and len(w) >= 2]
+    if not words:
+        return None
+    return " OR ".join('"' + w.replace('"', "") + ('"*' if len(w) >= 4 else '"') for w in dict.fromkeys(words))
+
+
+def _bm25_to_distance(scores: list[float]) -> list[float]:
+    """bm25() is negative, more negative = better. Map to 0 (best) .. 1 (worst) like cosine distance."""
+    if not scores:
+        return []
+    best, worst = min(scores), max(scores)
+    span = (worst - best) or 1.0
+    return [(sc - best) / span for sc in scores]
+
+
+def retrieve_fts(query_text: str, top_k: int = DEFAULT_TOP_K) -> list[RetrievedChunk]:
+    """Top posts and prep notes by bm25. card_id holds the source id for posts and
+    -<note id> for your own stories (no card behind them)."""
+    query = _or_query(query_text)
+    if not query:
+        return []
+    conn = get_connection()
+    try:
+        hits = []
+        for r in conn.execute(
+            f"SELECT f.source_id, bm25(posts_fts, {_POSTS_WEIGHTS}) AS score, s.title, s.canonical_url, s.raw_text, "
+            "a.name AS author, ps.summary FROM posts_fts f JOIN sources s ON s.id = f.source_id "
+            "LEFT JOIN authors a ON a.id = s.author_id LEFT JOIN post_state ps ON ps.source_id = s.id "
+            "WHERE posts_fts MATCH ? ORDER BY score LIMIT ?", (query, top_k),
+        ):
+            text = body_text(r["raw_text"])[:_BODY_CHARS]
+            if r["summary"]:
+                text = f"Summary: {r['summary']}\n\n{text}"
+            hits.append({"score": r["score"], "card_id": int(r["source_id"]), "title": r["title"],
+                         "author": r["author"], "url": r["canonical_url"] or "", "text": text})
+
+        # prep_notes has no index of its own: build a throwaway one (it is small).
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS temp.prep_fts USING fts5("
+                     "note_id UNINDEXED, text, tokenize = 'unicode61 remove_diacritics 2')")
+        conn.execute("DELETE FROM temp.prep_fts")
+        conn.execute("INSERT INTO temp.prep_fts (note_id, text) SELECT n.id, t.name || ' ' || n.text "
+                     "FROM prep_notes n JOIN prep_topics t ON t.id = n.topic_id")
+        for r in conn.execute(
+            "SELECT p.note_id, bm25(prep_fts) AS score, n.text, n.source_id, t.name AS topic, "
+            "s.title, s.canonical_url, a.name AS author FROM temp.prep_fts p "
+            "JOIN prep_notes n ON n.id = p.note_id JOIN prep_topics t ON t.id = n.topic_id "
+            "LEFT JOIN sources s ON s.id = n.source_id LEFT JOIN authors a ON a.id = s.author_id "
+            "WHERE prep_fts MATCH ? ORDER BY score LIMIT ?", (query, top_k),
+        ):
+            mine = r["source_id"] is None
+            hits.append({
+                "score": r["score"],
+                "card_id": -int(r["note_id"]) if mine else int(r["source_id"]),
+                "title": f"My story: {r['topic']}" if mine else f"Prep note ({r['topic']}): {r['title'] or ''}",
+                "author": "You" if mine else r["author"],
+                "url": "" if mine else (r["canonical_url"] or ""),
+                "text": r["text"],
+            })
+    finally:
+        conn.close()
+
+    hits.sort(key=lambda h: h["score"])
+    hits = hits[:top_k]
+    return [
+        RetrievedChunk(card_id=h["card_id"], source_title=h["title"], author_name=h["author"],
+                       chunk_text=h["text"], distance=d, url=h["url"])
+        for h, d in zip(hits, _bm25_to_distance([h["score"] for h in hits]))
+    ]
+
+
 def retrieve(
     query_text: str,
     top_k: int = DEFAULT_TOP_K,
     filter_topics: list[str] | None = None,
 ) -> list[RetrievedChunk]:
+    if use_fts_only():
+        return retrieve_fts(query_text, top_k)
     semantic_hits = _semantic_search(query_text, top_k, filter_topics)
     fts_hits = _fts_search(query_text, top_k)
 

@@ -2,8 +2,6 @@ import hashlib
 import json
 import time
 
-import chromadb
-
 from contentpilot import config
 from contentpilot.db import get_connection
 from contentpilot.extraction import ExtractionResult
@@ -18,6 +16,8 @@ _chroma_client = None
 def _get_chroma_collection():
     global _chroma_client
     if _chroma_client is None:
+        import chromadb  # optional: only the vector index needs it
+
         _chroma_client = chromadb.PersistentClient(path=_CHROMA_PATH)
     return _chroma_client.get_or_create_collection(
         _COLLECTION_NAME,

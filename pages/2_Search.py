@@ -50,7 +50,7 @@ since = {
 
 if st.session_state.search_flash:
     kind, msg = st.session_state.search_flash
-    getattr(st, kind)(msg)
+    getattr(st, kind)(msg.replace("$", r"\$"))  # "$" pairs would render as LaTeX
     st.session_state.search_flash = None
 
 with service.transaction() as conn:

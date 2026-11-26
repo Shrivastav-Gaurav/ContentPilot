@@ -7,7 +7,7 @@ bulk extraction.
 import json
 
 import requests
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError
 
 from contentpilot import config
 from contentpilot.rag.retriever import RetrievedChunk
@@ -51,10 +51,19 @@ class SynthesisResult(BaseModel):
     sources_used: list[SourceUsed] = Field(default_factory=list)
     confidence: str
     gaps: list[str] = Field(default_factory=list)
+    # OpenRouter cost of the call(s) that produced this answer, retry included.
+    # Private so it never ends up in model_dump() / the saved answer JSON.
+    _cost_usd: float = PrivateAttr(default=0.0)
+
+    @property
+    def cost_usd(self) -> float:
+        return self._cost_usd
 
 
 class SynthesisValidationError(ValueError):
-    pass
+    def __init__(self, message: str, cost_usd: float = 0.0):
+        super().__init__(message)
+        self.cost_usd = cost_usd  # the failed calls still cost money
 
 
 def _strip_json_fences(raw: str) -> str:
@@ -119,11 +128,16 @@ def _call_openrouter(query: str, chunks: list[RetrievedChunk], extra_instruction
     return payload
 
 
+def _cost(payload: dict) -> float:
+    return float((payload.get("usage") or {}).get("cost") or 0.0)
+
+
 def synthesize(query: str, chunks: list[RetrievedChunk]) -> SynthesisResult:
     # confidence isn't known until the LLM responds, so it can't be a trace
     # tag (tags are set at span creation); query is tagged here instead.
     with trace_llm_call("interview_synthesis", query=query):
         payload = _call_openrouter(query, chunks)
+        cost = _cost(payload)
         raw = payload["choices"][0]["message"]["content"]
 
         try:
@@ -135,13 +149,15 @@ def synthesize(query: str, chunks: list[RetrievedChunk]) -> SynthesisResult:
                 "Respond again with ONLY the corrected valid JSON in the exact shape requested."
             )
             payload = _call_openrouter(query, chunks, extra_instruction=retry_instruction)
+            cost += _cost(payload)
             raw = payload["choices"][0]["message"]["content"]
             try:
                 parsed = _parse(raw)
             except (ValidationError, json.JSONDecodeError) as second_error:
-                raise SynthesisValidationError(str(second_error)) from second_error
+                raise SynthesisValidationError(str(second_error), cost_usd=cost) from second_error
 
     if len(chunks) < 3:
         parsed.confidence = "low"
 
+    parsed._cost_usd = cost
     return parsed

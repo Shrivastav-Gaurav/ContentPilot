@@ -71,19 +71,49 @@ def save_status(source_id: int) -> None:
         _flash("error", f"Could not save the status: {exc}")
 
 
+def older_action(source_id: int, action: str) -> None:
+    try:
+        with service.transaction() as conn:
+            service.record_action(conn, source_id, action)
+        _flash("success", "Archived." if action == "archive" else "Dismissed.")
+    except Exception as exc:
+        _flash("error", f"Could not do that: {exc}")
+
+
+def render_older(older: list[dict]) -> None:
+    """Open job posts 60-90 days old: not ranked or scored, only Archive / Dismiss."""
+    if not older:
+        return
+    with st.expander(f"Older than 60 days ({len(older)})", expanded=False):
+        st.caption("Too old to rank, so not scored. They archive themselves at 90 days.")
+        for o in older:
+            with st.container(border=True, key=f"old_{o['source_id']}"):
+                st.markdown(f"**{md(o['role_title'] or o['display_title'])}**")
+                st.caption(" · ".join(x for x in (
+                    f"posted by {md(o['publisher'])}" if o["publisher"] else None,
+                    f"{fmt_date(o['published_at'])} ({o['age_days']} days ago)") if x))
+                st.markdown(f"[Open original]({o['canonical_url']})")
+                c1, c2 = st.columns(2)
+                c1.button("Archive", key=f"oarch_{o['source_id']}", on_click=older_action,
+                          args=(o["source_id"], "archive"), width="stretch")
+                c2.button("Dismiss", key=f"odis_{o['source_id']}", on_click=older_action,
+                          args=(o["source_id"], "dismiss"), width="stretch")
+
+
 now = int(time.time())
 with service.transaction() as conn:
     jobs = service.list_jobs(conn, resume.hash, now)
+    older = service.list_older_jobs(conn, now)
     archived = service.jobs_archived_count(conn)
 
 if not resume.ok:
     st.warning(f"{resume.notice} Fit scores and Apply packs need it.")
 else:
-    st.caption(f"Resume: {resume.source}")
+    st.caption(resume.source)
 
 if st.session_state.jobs_flash:
     kind, text = st.session_state.jobs_flash
-    getattr(st, kind)(text)
+    getattr(st, kind)(text.replace("$", r"\$"))  # "$0.10 … $0.25" would render as LaTeX
     st.session_state.jobs_flash = None
 
 unscored = sum(1 for j in jobs if j["fit"] is None)
@@ -95,6 +125,7 @@ if resume.ok and unscored:
 
 if not jobs:
     st.info("No open or shortlisted jobs. Job posts from your Inbox show up here.")
+    render_older(older)
     st.stop()
 
 table = [{
@@ -163,3 +194,5 @@ for j in jobs:
                        else date.today() + timedelta(days=7))
             st.date_input("Come back to it on", value=default, min_value=date.today(), key=f"defer_{sid}")
         st.button("Save", key=f"save_{sid}", on_click=save_status, args=(sid,))
+
+render_older(older)
