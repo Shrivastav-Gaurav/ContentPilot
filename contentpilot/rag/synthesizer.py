@@ -72,6 +72,12 @@ def _strip_json_fences(raw: str) -> str:
     return raw
 
 
+def _parse(raw: str) -> SynthesisResult:
+    # strict=False: models often put literal newlines inside the multi-paragraph
+    # "answer" string, which strict JSON rejects as control characters.
+    return SynthesisResult.model_validate(json.loads(_strip_json_fences(raw), strict=False))
+
+
 def _format_sources(chunks: list[RetrievedChunk]) -> str:
     blocks = []
     for i, chunk in enumerate(chunks, start=1):
@@ -121,7 +127,7 @@ def synthesize(query: str, chunks: list[RetrievedChunk]) -> SynthesisResult:
         raw = payload["choices"][0]["message"]["content"]
 
         try:
-            parsed = SynthesisResult.model_validate_json(_strip_json_fences(raw))
+            parsed = _parse(raw)
         except (ValidationError, json.JSONDecodeError) as first_error:
             retry_instruction = (
                 "Your previous response failed validation with this error:\n"
@@ -131,7 +137,7 @@ def synthesize(query: str, chunks: list[RetrievedChunk]) -> SynthesisResult:
             payload = _call_openrouter(query, chunks, extra_instruction=retry_instruction)
             raw = payload["choices"][0]["message"]["content"]
             try:
-                parsed = SynthesisResult.model_validate_json(_strip_json_fences(raw))
+                parsed = _parse(raw)
             except (ValidationError, json.JSONDecodeError) as second_error:
                 raise SynthesisValidationError(str(second_error)) from second_error
 

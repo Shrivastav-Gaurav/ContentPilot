@@ -7,30 +7,9 @@ relevant.
 """
 from dataclasses import dataclass
 
+from contentpilot.copilot.topics import CORE_TPM_TOPICS  # noqa: F401  (re-exported)
 from contentpilot.storage import _get_chroma_collection
 
-CORE_TPM_TOPICS = [
-    "Amazon Leadership Principles",
-    "Estimation and sizing complex projects",
-    "System design trade-offs",
-    "Defining and tracking success metrics",
-    "Cross-team and org-level influence without authority",
-    "Managing ambiguous or conflicting stakeholder priorities",
-    "Technical debt vs. feature velocity trade-offs",
-    "Incident management and postmortems",
-    "Roadmap prioritization frameworks",
-    "Working with engineering on technical feasibility",
-    "Data-driven decision making",
-    "Risk management and mitigation planning",
-    "Scaling systems and organizations",
-    "Vendor and third-party dependency management",
-    "Launch planning and go-to-market coordination",
-    "Resource allocation and headcount planning",
-    "Conflict resolution between teams",
-    "Communicating technical concepts to non-technical stakeholders",
-    "Driving consensus across disagreeing stakeholders",
-    "Post-launch iteration and continuous improvement",
-]
 
 # Cosine distance threshold below which a card counts as "covering" a topic.
 # Tuned against real data: a tight topical match (e.g. "neural networks"

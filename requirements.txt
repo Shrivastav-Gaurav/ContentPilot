@@ -8,3 +8,4 @@ pydantic
 playwright
 apscheduler
 langsmith
+python-docx

@@ -32,7 +32,8 @@ st.caption(" · ".join(f"{TYPE_LABELS[t]}: {n}" for t, n in counts["open_by_type
 st.page_link("pages/1_Inbox.py", label="Inbox: sort what's waiting", icon="📥")
 st.page_link("pages/2_Search.py", label="Search everything you've saved", icon="🔎")
 st.page_link("pages/3_Done_log.py", label="Done log: what you did, and undo", icon="✅")
-st.page_link("pages/4_Interview_Prep.py", label="Interview Prep", icon="🎯")
+st.page_link("pages/4_Jobs.py", label="Jobs: ranked by fit, with Apply packs", icon="💼")
+st.page_link("pages/5_Prep_Notebook.py", label="Prep Notebook: notes, stories, answers", icon="🎯")
 
 st.divider()
 

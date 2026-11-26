@@ -18,7 +18,7 @@ READ = ("Mark read", "read", None)
 DISMISS = ("Dismiss", "dismiss", None)
 BUTTONS = {
     "job": [("Shortlist", "shortlist", "Job shortlist"), READ, DISMISS],
-    "learning": [("File to Prep", "file_to_prep", "Interview Prep"), READ, DISMISS],
+    "learning": [("File to Prep", "file_to_prep", None), READ, DISMISS],
     "post_idea": [("Send to PostPilot", "send_postpilot", "PostPilot"),
                   ("Save to notes file", "save_notes", None), READ, DISMISS],
     "tool": [("Park", "park", "Parked tools"), READ, DISMISS],
@@ -39,11 +39,43 @@ def do_action(source_id: int, action: str, destination: str | None) -> None:
         with service.transaction() as conn:
             if action == "save_notes":
                 service.save_to_notes(conn, source_id)
+            elif action == "file_to_prep":
+                service.file_to_prep(conn, source_id)  # one cached Haiku call
             else:
                 service.record_action(conn, source_id, action, destination=destination)
         st.session_state.acted.setdefault(source_id, []).append(action)
     except Exception as exc:
         _flash("error", f"Could not record that: {exc}")
+
+
+def do_change_topic(source_id: int, from_topic_id: int, widget_key: str, topic_ids: dict) -> None:
+    try:
+        with service.transaction() as conn:
+            service.move_prep_notes(conn, source_id, from_topic_id, topic_ids[st.session_state[widget_key]])
+    except Exception as exc:
+        _flash("error", f"Could not change the topic: {exc}")
+
+
+@st.dialog("File all learning posts")
+def confirm_file_all(count: int) -> None:
+    st.write(f"File **{count}** open learning post{'s' if count != 1 else ''} into the Prep Notebook? "
+             "Each new post makes one small Haiku call (posts filed before cost nothing). "
+             "They leave the Inbox; you can move any back from the Done log.")
+    c1, c2 = st.columns(2)
+    if c1.button("File them", type="primary", width="stretch"):
+        bar = st.progress(0.0, text="Filing…")
+        with service.transaction() as conn:
+            stats = service.file_all_learning(
+                conn, on_progress=lambda i, n: bar.progress(i / n, text=f"Filed {i} of {n}"))
+        msg = f"Filed {stats['filed']} of {stats['total']} into Prep ({stats['llm_calls']} new calls, ${stats['cost_usd']:.3f})."
+        if stats["stopped_by_cap"]:
+            msg += " Stopped at today's spend cap; run it again tomorrow for the rest."
+        if stats["errors"]:
+            msg += f" {stats['errors']} failed; try those one by one."
+        _flash("warning" if stats["stopped_by_cap"] or stats["errors"] else "success", msg)
+        st.rerun()
+    if c2.button("Cancel", width="stretch"):
+        st.rerun()
 
 
 def do_move_back(source_id: int) -> None:
@@ -128,9 +160,16 @@ with service.transaction() as conn:
             continue
         if sid not in open_ids and (post_type is None or post["post_type"] == post_type):
             acted_rows.append(post)
+    filed = {sid: service.prep_topics_for_source(conn, sid)
+             for sid, acts in st.session_state.acted.items() if "file_to_prep" in acts}
+    all_topics = {t["name"]: t["id"] for t in service.list_prep_topics(conn)} if filed else {}
+    learning_count = len(service.open_learning_ids(conn, now)) if post_type in (None, "learning") else 0
 
 items = sorted(rows + acted_rows, key=lambda r: (r["due_at"] is None, r["due_at"] or 0))
 st.caption(f"{len(rows)} open" + (f" · {len(acted_rows)} handled just now" if acted_rows else ""))
+
+if learning_count and st.button(f"File all learning posts ({learning_count})"):
+    confirm_file_all(learning_count)
 
 if not items:
     st.info("Nothing waiting here. Add a link above, or run a scan.")
@@ -151,7 +190,14 @@ def render_row(r: dict) -> None:
 
         buttons = BUTTONS.get(r["post_type"], [READ, DISMISS])
         if done:
-            st.success(" · ".join(action_label(a) for a in done))
+            topics = filed.get(sid)
+            labels = [f"Filed in Prep: {', '.join(t['name'] for t in topics)}" if a == "file_to_prep" and topics
+                      else action_label(a) for a in done]
+            st.success(" · ".join(labels))
+            for t in topics or []:
+                key = f"{sid}_topic_{t['id']}"
+                st.selectbox("Change topic", list(all_topics), index=list(all_topics).index(t["name"]), key=key,
+                             on_change=do_change_topic, args=(sid, t["id"], key, all_topics))
             # A post idea can still take the other independent action.
             extra = [b for b in buttons if b[1] in INDEPENDENT and b[1] not in done] if set(done) <= INDEPENDENT else []
             cols = st.columns(len(extra) + 1)
