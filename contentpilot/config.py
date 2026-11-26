@@ -63,6 +63,27 @@ def openai_api_key() -> str | None:
     return (os.environ.get("OPENAI_API_KEY") or "").strip() or None
 
 
+def ingest_token() -> str | None:
+    """Shared secret for POST /api/ingest (header X-Ingest-Token). Unset -> ingest is refused."""
+    return (os.environ.get("INGEST_TOKEN") or "").strip() or None
+
+
+def inbox_url() -> str:
+    """Where the share page's "open Inbox" link points (the Streamlit Inbox on the same host)."""
+    return os.environ.get("CONTENTPILOT_INBOX_URL", "/Inbox")
+
+
+def pwa_start_url() -> str:
+    """What the installed Android app opens (default: the Streamlit home page)."""
+    return os.environ.get("CONTENTPILOT_PWA_START_URL", "/")
+
+
+def share_requires_tailscale_identity() -> bool:
+    """POST /share accepts only requests that came through `tailscale serve` from a tailnet
+    user (Tailscale-User-Login header) unless this is turned off."""
+    return os.environ.get("CONTENTPILOT_SHARE_REQUIRE_TS_IDENTITY", "1").strip().lower() not in ("0", "false", "no")
+
+
 def jina_api_key() -> str | None:
     return os.environ.get(JINA_API_KEY_ENV) or None
 

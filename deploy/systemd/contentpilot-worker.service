@@ -1,0 +1,20 @@
+[Unit]
+Description=ContentPilot worker (job queue, triage/embedding sweep, daily rules)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@REPO@
+EnvironmentFile=@REPO@/deploy/contentpilot.env
+ExecStart=@REPO@/venv/bin/python -m contentpilot.worker
+Restart=on-failure
+RestartSec=10
+MemoryHigh=150M
+MemoryMax=220M
+MemorySwapMax=128M
+OOMScoreAdjust=500
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

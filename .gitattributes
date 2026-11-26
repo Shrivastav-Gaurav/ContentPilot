@@ -1,0 +1,4 @@
+# Files that run on the Linux VM must keep LF line endings.
+*.sh text eol=lf
+deploy/systemd/* text eol=lf
+deploy/*.example text eol=lf

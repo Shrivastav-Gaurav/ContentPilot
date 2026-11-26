@@ -32,3 +32,6 @@ chroma_data/
 .idea/
 .DS_Store
 Thumbs.db
+
+# VM-specific unit settings (deploy/contentpilot.env.example is the template)
+deploy/contentpilot.env

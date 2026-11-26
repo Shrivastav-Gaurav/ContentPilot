@@ -14,6 +14,13 @@ _COLLECTION_NAME = "insights_v1_minilm"
 _chroma_client = None
 
 
+def chroma_available() -> bool:
+    """chromadb is optional (left out of requirements-vm.txt)."""
+    import importlib.util
+
+    return importlib.util.find_spec("chromadb") is not None
+
+
 def _get_chroma_collection():
     global _chroma_client
     if _chroma_client is None:
@@ -226,6 +233,8 @@ def _index_card(conn, card_id: int) -> None:
     if row is None:
         return
 
+    if not chroma_available():
+        return  # no vector index on this machine (e.g. the VM); embedded_at stays NULL for later
     extraction = json.loads(row["extraction_json"])
     collection = _get_chroma_collection()
 
@@ -280,9 +289,9 @@ def rebuild_index() -> int:
     """Re-embed all cards from SQLite into Chroma. SQLite is the source of truth."""
     conn = get_connection()
     try:
-        global _chroma_client
-        if _chroma_client is None:
-            _chroma_client = chromadb.PersistentClient(path=_CHROMA_PATH)
+        if not chroma_available():
+            return 0
+        _get_chroma_collection()  # opens the client
         _chroma_client.delete_collection(_COLLECTION_NAME)
 
         card_ids = [row["id"] for row in conn.execute("SELECT id FROM cards WHERE status = 'ok'")]

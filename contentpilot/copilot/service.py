@@ -842,3 +842,118 @@ def show_apply_pack(conn, source_id: int, resume: Resume, now: int | None = None
     pack = build_apply_pack(conn, source_id, resume)
     mark_apply_pack_copied(conn, source_id, now=now)
     return pack
+
+
+# --- 11. ingest (API, share target, laptop scan push) ------------------------------------
+
+INGEST_MAX_URLS = 50
+
+
+def _existing_source(conn, canonical_url: str):
+    return conn.execute(
+        "SELECT s.id, ps.source_id AS triaged FROM sources s LEFT JOIN post_state ps ON ps.source_id = s.id "
+        "WHERE s.canonical_url = ?", (canonical_url,)).fetchone()
+
+
+def ingest_urls(conn, urls: list[str], intent: str | None = None, fetch: Callable | None = None,
+                llm: triage.LLM = triage.openrouter_llm, embedder=None, now: int | None = None) -> list[dict]:
+    """Add links from outside the app: save, triage, embed. One result per URL:
+    {"url", "status": "added" | "duplicate" | "blocked" | "failed", "source_id", "detail", ...}.
+
+    Duplicates are caught by canonical URL before fetching, so re-sent links cost nothing.
+    New posts are triaged together (10 per LLM call) and then embedded if meaning search is
+    set up. Commits as it goes (each fetched source is saved through storage on its own
+    connection), so a failure part-way keeps what was already added.
+    """
+    from contentpilot.fetchers.base import FetchBlockedError, FetchUnavailableError
+    from contentpilot.fetchers.jina import canonicalize
+    from contentpilot.storage import save_source
+    if fetch is None:
+        from contentpilot.fetchers.router import fetch
+    now = _now(now)
+    intent = (intent or "").strip() or None
+    results: list[dict] = []
+    new_ids: list[int] = []
+    seen: set[str] = set()
+    conn.commit()
+
+    for url in list(dict.fromkeys(u.strip() for u in urls if u and u.strip()))[:INGEST_MAX_URLS]:
+        res = {"url": url}
+        results.append(res)
+        if not url.startswith(("https://", "http://")):
+            res.update(status="failed", detail="not a web link")
+            continue
+        canonical = canonicalize(url)
+        row = None if canonical in seen else _existing_source(conn, canonical)
+        if canonical in seen or (row and row["triaged"]):
+            res.update(status="duplicate", source_id=row["id"] if row else None)
+            continue
+        try:
+            raw = fetch(url)
+        except FetchBlockedError as exc:
+            res.update(status="blocked", detail=str(exc)[:200])
+            continue
+        except FetchUnavailableError as exc:
+            res.update(status="failed", detail=str(exc)[:200])
+            continue
+        except Exception as exc:  # network, parsing, rate limits
+            res.update(status="failed", detail=f"{type(exc).__name__}: {str(exc)[:160]}")
+            continue
+        seen.update({canonical, raw.canonical_url})
+        row = _existing_source(conn, raw.canonical_url)
+        if row and row["triaged"]:
+            if intent:
+                conn.execute("UPDATE sources SET intent = COALESCE(intent, ?) WHERE id = ?", (intent, row["id"]))
+                conn.commit()
+            res.update(status="duplicate", source_id=row["id"])
+            continue
+        source_id = save_source(raw)
+        conn.execute("UPDATE sources SET intent = COALESCE(?, intent), saved_at = COALESCE(saved_at, ?) WHERE id = ?",
+                     (intent, now, source_id))
+        conn.commit()
+        res.update(status="added", source_id=source_id)
+        new_ids.append(source_id)
+
+    if new_ids:
+        backfill_facts(conn, new_ids)
+        stats = run_triage(conn, llm=llm, now=now, only_ids=new_ids)
+        for sid in new_ids:
+            search.index_source(conn, sid)
+        conn.commit()
+        _embed_if_enabled(conn, embedder, now)
+        for res in results:
+            if res.get("status") == "added":
+                post = get_post(conn, res["source_id"])
+                res.update(title=post["display_title"], post_type=post["post_type"], post_status=post["status"],
+                           triaged=post["post_type"] is not None)
+                if not res["triaged"]:
+                    res["detail"] = ("saved; triage waits for tomorrow's budget" if stats["stopped_by_cap"]
+                                     else "saved; triage failed and will be retried")
+    return results
+
+
+def _embed_if_enabled(conn, embedder=None, now: int | None = None) -> dict | None:
+    """Keep meaning search current once it is set up. Never fails the caller."""
+    from contentpilot.copilot import embeddings
+    try:
+        if embedder is not None or (embeddings.enabled() and embeddings.has_embeddings(conn)):
+            stats = embeddings.embed_pending(conn, embedder=embedder, now=now)
+            conn.commit()
+            return stats
+    except Exception:
+        conn.rollback()
+    return None
+
+
+def maintenance(conn, llm: triage.LLM = triage.openrouter_llm, now: int | None = None) -> dict:
+    """Background sweep (worker): archive old jobs, triage anything left untriaged, embed new text."""
+    now = _now(now)
+    out = {"rules": apply_daily_rules(conn, now)}
+    conn.commit()
+    pending = [p["id"] for p in _untriaged(conn)]
+    if pending:
+        backfill_facts(conn, pending)
+        out["triage"] = run_triage(conn, llm=llm, now=now, only_ids=pending)
+        conn.commit()
+    out["embed"] = _embed_if_enabled(conn, now=now)
+    return out

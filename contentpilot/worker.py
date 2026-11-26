@@ -337,13 +337,37 @@ def _start_scheduler():
     return scheduler
 
 
+MAINTENANCE_INTERVAL_SEC = 30 * 60
+
+
+def run_maintenance() -> dict | None:
+    """Archive old jobs, triage anything untriaged, embed new text. Never crashes the worker."""
+    from contentpilot.copilot import service
+    conn = get_connection()
+    try:
+        out = service.maintenance(conn)
+        conn.commit()
+        print(f"[worker] maintenance: {out}", flush=True)
+        return out
+    except Exception as exc:
+        conn.rollback()
+        print(f"[worker] maintenance failed: {type(exc).__name__}: {exc}", flush=True)
+        return None
+    finally:
+        conn.close()
+
+
 def run_forever() -> None:
     load_dotenv()
     _reset_stuck_items()
     scheduler = _start_scheduler()
-    print("ContentPilot worker started. Polling for jobs...")
+    print("ContentPilot worker started. Polling for jobs...", flush=True)
+    next_maintenance = 0.0
     try:
         while True:
+            if time.time() >= next_maintenance:
+                run_maintenance()
+                next_maintenance = time.time() + MAINTENANCE_INTERVAL_SEC
             job = _next_queued_job()
             if job is None:
                 time.sleep(config.WORKER_POLL_INTERVAL_SEC)

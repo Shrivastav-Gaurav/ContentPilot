@@ -1,0 +1,21 @@
+[Unit]
+Description=ContentPilot API + share target (uvicorn, localhost only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@REPO@
+EnvironmentFile=@REPO@/deploy/contentpilot.env
+ExecStart=@REPO@/venv/bin/uvicorn contentpilot.api:app --host 127.0.0.1 --port ${CP_API_PORT} \
+    --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+RestartSec=5
+MemoryHigh=150M
+MemoryMax=220M
+MemorySwapMax=128M
+OOMScoreAdjust=500
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

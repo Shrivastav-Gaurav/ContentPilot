@@ -73,6 +73,18 @@ python -m contentpilot.worker
 streamlit run Home.py
 ```
 
+## Deploy on a small VM (private, over Tailscale)
+
+`deploy/README-vm.md` has every command: install (`bash deploy/install.sh`), `tailscale serve`
+for private HTTPS, the systemd services (web, API + Android share target, worker), nightly
+backups, and the laptop job that pushes LinkedIn saved posts to the VM.
+
+Restore a backup on the VM (one line; pick the file from `ls ~/contentpilot-backups`):
+
+```bash
+sudo systemctl stop contentpilot-web contentpilot-api contentpilot-worker && cp ~/contentpilot-backups/contentpilot-YYYYMMDD-HHMMSS.sqlite3 ~/ContentPilot/data/contentpilot.sqlite3 && rm -f ~/ContentPilot/data/contentpilot.sqlite3-wal ~/ContentPilot/data/contentpilot.sqlite3-shm && sudo systemctl start contentpilot-web contentpilot-api contentpilot-worker
+```
+
 ## Screenshots
 
 > _Add screenshots before publishing: card library, saved posts with flags, interview prep Q&A._

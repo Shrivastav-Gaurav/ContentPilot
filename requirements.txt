@@ -10,3 +10,7 @@ apscheduler
 langsmith
 python-docx
 numpy
+fastapi
+uvicorn
+python-multipart
+httpx
