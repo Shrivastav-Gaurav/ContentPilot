@@ -1,11 +1,13 @@
 """Due dates and automatic status rules. Pure functions, no I/O, no LLM."""
 from dataclasses import dataclass
+from datetime import datetime, timedelta, tzinfo
 
 DAY = 86_400
 
 POST_TYPES = ("job", "learning", "post_idea", "tool", "noise")
 STATUSES = ("open", "done", "read", "parked", "archived", "dismissed")
 JOB_USER_STATUSES = ("not_started", "in_progress", "applied", "deferred", "not_a_fit")
+TYPE_LABELS = {"job": "Job", "learning": "Learning", "post_idea": "Post idea", "tool": "Tool", "noise": "Noise"}
 
 # Defaults; each can be overridden in the settings table as due.<key> (days).
 DEFAULT_RULES = {
@@ -86,3 +88,42 @@ def job_rankable(published_at: int | None, now: int, rules: dict | None = None) 
     """Only job posts no older than job_rank_max_age days get a fit score."""
     r = {**DEFAULT_RULES, **(rules or {})}
     return published_at is None or now - published_at <= r["job_rank_max_age"] * DAY
+
+
+# --- calendar helpers (local time unless tz is given) ---------------------------
+
+def _local(ts: int, tz: tzinfo | None) -> datetime:
+    return datetime.fromtimestamp(ts, tz) if tz else datetime.fromtimestamp(ts)
+
+
+def start_of_day(now: int, tz: tzinfo | None = None) -> int:
+    d = _local(now, tz)
+    return int(d.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+
+def start_of_week(now: int, tz: tzinfo | None = None) -> int:
+    """Monday 00:00 of the current week."""
+    d = _local(now, tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int((d - timedelta(days=d.weekday())).timestamp())
+
+
+def start_of_year(now: int, tz: tzinfo | None = None) -> int:
+    d = _local(now, tz)
+    return int(d.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+
+def due_label(due_at: int | None, now: int, tz: tzinfo | None = None) -> str | None:
+    """'due today', 'due tomorrow', 'overdue 2d', 'due Fri', 'due Dec 3', by calendar day."""
+    if due_at is None:
+        return None
+    days = (_local(due_at, tz).date() - _local(now, tz).date()).days
+    if days < 0:
+        return f"overdue {-days}d"
+    if days == 0:
+        return "due today"
+    if days == 1:
+        return "due tomorrow"
+    d = _local(due_at, tz)
+    if days < 7:
+        return f"due {d:%a}"
+    return f"due {d:%b} {d.day}"

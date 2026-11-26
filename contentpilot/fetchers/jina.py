@@ -70,6 +70,23 @@ def _looks_like_login_wall(text: str) -> bool:
     return False
 
 
+# Pages LinkedIn serves instead of the post when it wants a login. Jina returns
+# them with a full page of chrome, so the length-based checks above miss them;
+# the page title is the reliable signal.
+_BLOCKED_PAGE_TITLES = (
+    "sign up | linkedin",
+    "linkedin login",
+    "log in or sign up",
+)
+
+
+def _is_blocked_page_title(title: str | None) -> bool:
+    if not title:
+        return False
+    t = " ".join(title.lower().split())
+    return any(t == bad or t.startswith(bad + " ") or t.startswith(bad + ",") for bad in _BLOCKED_PAGE_TITLES)
+
+
 def _looks_like_not_found(text: str) -> bool:
     lowered = text.lower()
     return any(marker in lowered for marker in _NOT_FOUND_MARKERS)
@@ -124,6 +141,9 @@ def fetch(url: str) -> RawContent:
 
     if _looks_like_login_wall(text):
         raise FetchBlockedError(f"Login wall detected for {canonical}")
+
+    if _is_blocked_page_title(_extract_title(text)):
+        raise FetchBlockedError(f"Got a LinkedIn sign-up/login page instead of the post for {canonical}")
 
     if len(text) < _MIN_TEXT_LENGTH:
         raise FetchBlockedError(

@@ -3,15 +3,36 @@
 Every function takes an open sqlite3 connection (row_factory=sqlite3.Row) and
 leaves commit to the caller, so a whole run is one transaction.
 """
+import os
 import time
+from contextlib import contextmanager
+from datetime import datetime
+from typing import Callable
 
+from contentpilot import config
 from contentpilot.copilot import rules, search, triage
-from contentpilot.copilot.parsing import parse_published_at, parse_publisher, parse_title, body_text
+from contentpilot.copilot.parsing import (body_text, display_title, parse_published_at, parse_publisher,
+                                          parse_title)
 
 # What each action does to the post's status. Anything else -> 'done'.
 _ACTION_STATUS = {"read": "read", "park": "parked", "dismiss": "dismissed", "archive": "archived"}
 # Actions that record work but leave the post where it is.
 _NO_STATUS_CHANGE = {"apply_pack_copied", "job_status"}
+
+
+@contextmanager
+def transaction():
+    """For pages: one connection, committed on success, rolled back on error."""
+    from contentpilot.db import get_connection
+    conn = get_connection()
+    try:
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _now(now: int | None) -> int:
@@ -30,10 +51,17 @@ def load_rules(conn) -> dict:
 
 # --- 1. facts without an LLM -------------------------------------------------
 
-def backfill_facts(conn) -> dict:
+def backfill_facts(conn, source_ids: list[int] | None = None) -> dict:
     """Fill published_at, title and publisher from the fetched text where missing."""
     counts = {"published_at": 0, "title": 0, "publisher": 0}
-    rows = conn.execute("SELECT id, raw_text, published_at, title, author_id FROM sources").fetchall()
+    sql = "SELECT id, raw_text, published_at, title, author_id FROM sources"
+    params: list = []
+    if source_ids is not None:
+        if not source_ids:
+            return counts
+        sql += f" WHERE id IN ({','.join('?' * len(source_ids))})"
+        params = list(source_ids)
+    rows = conn.execute(sql, params).fetchall()
     for r in rows:
         if r["published_at"] is None and (ts := parse_published_at(r["raw_text"])):
             conn.execute("UPDATE sources SET published_at = ? WHERE id = ?", (ts, r["id"]))
@@ -59,14 +87,20 @@ def spent_today(conn, now: int | None = None) -> float:
     return float(row["c"])
 
 
-def _untriaged(conn) -> list[dict]:
-    rows = conn.execute(
+def _untriaged(conn, only_ids: list[int] | None = None) -> list[dict]:
+    sql = (
         "SELECT s.id, s.title, s.raw_text, s.intent, s.saved_at, s.fetched_at, s.published_at, a.name AS publisher "
         "FROM sources s LEFT JOIN authors a ON a.id = s.author_id "
         "LEFT JOIN post_state ps ON ps.source_id = s.id "
-        "WHERE ps.source_id IS NULL AND s.raw_text IS NOT NULL AND TRIM(s.raw_text) != '' "
-        "ORDER BY s.id"
-    ).fetchall()
+        "WHERE ps.source_id IS NULL AND s.raw_text IS NOT NULL AND TRIM(s.raw_text) != ''"
+    )
+    params: list = []
+    if only_ids is not None:
+        if not only_ids:
+            return []
+        sql += f" AND s.id IN ({','.join('?' * len(only_ids))})"
+        params = list(only_ids)
+    rows = conn.execute(sql + " ORDER BY s.id", params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -92,13 +126,14 @@ def _apply_triage(conn, post: dict, item: triage.TriageItem, now: int, rule_cfg:
 
 
 def run_triage(conn, llm: triage.LLM = triage.openrouter_llm, now: int | None = None,
-               daily_cap_usd: float = 0.10, batch_size: int = triage.BATCH_SIZE) -> dict:
-    """Triage every post without a post_state row. Cached posts cost nothing."""
+               daily_cap_usd: float = 0.10, batch_size: int = triage.BATCH_SIZE,
+               only_ids: list[int] | None = None) -> dict:
+    """Triage every post without a post_state row (or just only_ids). Cached posts cost nothing."""
     now = _now(now)
     rule_cfg = load_rules(conn)
     stats = {"cached": 0, "llm_calls": 0, "triaged": 0, "cost_usd": 0.0, "stopped_by_cap": False, "errors": 0}
     pending: list[dict] = []
-    for post in _untriaged(conn):
+    for post in _untriaged(conn, only_ids):
         post["body"] = body_text(post["raw_text"])
         post["key"] = triage.cache_key(post["id"], post["raw_text"], post["intent"])
         cached = triage.load_cached(conn, post["key"])
@@ -236,22 +271,145 @@ def list_inbox(conn, now: int | None = None, post_type: str | None = None) -> li
     for r in conn.execute(sql, params):
         d = dict(r)
         d["overdue_days"] = max(0, (now - d["due_at"]) // rules.DAY) if d["due_at"] else 0
+        d["display_title"] = display_title(d["title"], d["summary"], d["publisher"])
         out.append(d)
     return out
 
 
-def list_done(conn, limit: int = 100) -> list[dict]:
-    """Done log: latest actions first, with the post they belong to."""
-    rows = conn.execute(
-        "SELECT ac.*, s.title, s.canonical_url, ps.status AS post_status "
+def list_done(conn, limit: int = 100, action: str | None = None) -> list[dict]:
+    """Done log: latest actions first, with the post they belong to.
+
+    Each row also gets display_title and automatic (True for rule-made actions)."""
+    sql = (
+        "SELECT ac.*, s.title, s.canonical_url, ps.status AS post_status, ps.summary, ps.post_type, "
+        "a.name AS publisher "
         "FROM actions ac JOIN sources s ON s.id = ac.source_id "
         "LEFT JOIN post_state ps ON ps.source_id = ac.source_id "
-        "WHERE ac.action != 'move_back' ORDER BY ac.created_at DESC, ac.id DESC LIMIT ?",
-        (limit,),
+        "LEFT JOIN authors a ON a.id = s.author_id "
+        "WHERE ac.action != 'move_back'"
     )
-    return [dict(r) for r in rows]
+    params: list = []
+    if action:
+        sql += " AND ac.action = ?"
+        params.append(action)
+    sql += " ORDER BY ac.created_at DESC, ac.id DESC LIMIT ?"
+    params.append(limit)
+    out = []
+    for r in conn.execute(sql, params):
+        d = dict(r)
+        d["display_title"] = display_title(d["title"], d["summary"], d["publisher"])
+        d["automatic"] = (d["destination"] or "").startswith("automatic:")
+        out.append(d)
+    return out
+
+
+def done_action_types(conn) -> list[str]:
+    """Distinct action names in the Done log, for the filter."""
+    return [r["action"] for r in conn.execute(
+        "SELECT DISTINCT action FROM actions WHERE action != 'move_back' ORDER BY action")]
 
 
 def status_counts(conn) -> dict:
     return {r["k"]: r["n"] for r in conn.execute(
         "SELECT COALESCE(post_type, '?') || ':' || status AS k, COUNT(*) AS n FROM post_state GROUP BY 1")}
+
+
+def get_post(conn, source_id: int) -> dict | None:
+    """One post with its triage state, for showing a row after an action."""
+    row = conn.execute(
+        "SELECT s.id AS source_id, s.canonical_url, s.title, s.published_at, s.source_type, s.intent, "
+        "a.name AS publisher, ps.post_type, ps.status, ps.summary, ps.suggested_action, ps.due_at "
+        "FROM sources s LEFT JOIN authors a ON a.id = s.author_id "
+        "LEFT JOIN post_state ps ON ps.source_id = s.id WHERE s.id = ?",
+        (source_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    d["display_title"] = display_title(d["title"], d["summary"], d["publisher"])
+    return d
+
+
+def home_counts(conn, now: int | None = None, tz=None) -> dict:
+    """Home page numbers: open posts by type, overdue (due before today), done this week."""
+    now = _now(now)
+    open_by_type = {t: 0 for t in rules.POST_TYPES if t != "noise"}
+    for r in conn.execute(
+        "SELECT post_type, COUNT(*) AS n FROM post_state WHERE status = 'open' "
+        "AND (snoozed_until IS NULL OR snoozed_until <= ?) GROUP BY post_type", (now,)
+    ):
+        open_by_type[r["post_type"] or "?"] = r["n"]
+    overdue = conn.execute(
+        "SELECT COUNT(*) AS n FROM post_state WHERE status = 'open' AND due_at IS NOT NULL AND due_at < ? "
+        "AND (snoozed_until IS NULL OR snoozed_until <= ?)", (rules.start_of_day(now, tz), now)
+    ).fetchone()["n"]
+    done_week = conn.execute(
+        "SELECT COUNT(*) AS n FROM actions WHERE created_at >= ? AND undone_at IS NULL "
+        "AND action NOT IN ('move_back', 'apply_pack_copied', 'job_status') "
+        "AND COALESCE(destination, '') NOT LIKE 'automatic:%'", (rules.start_of_week(now, tz),)
+    ).fetchone()["n"]
+    return {"open_by_type": open_by_type, "open_total": sum(open_by_type.values()),
+            "overdue": overdue, "done_this_week": done_week}
+
+
+# --- 6. new posts and the notes file ------------------------------------------
+
+def add_link(conn, url: str, intent: str | None = None, fetch: Callable | None = None,
+             llm: triage.LLM = triage.openrouter_llm, now: int | None = None,
+             daily_cap_usd: float = 0.10) -> dict:
+    """Fetch a link, save it with the user's intent, and triage just that post.
+
+    Call with no pending writes on conn: the source is saved through storage on its
+    own connection. A link that is already triaged is not sent to the LLM again.
+    Returns {"source_id", "new", "triage": stats or None, "post": get_post(...)}.
+    """
+    from contentpilot.storage import save_source
+    if fetch is None:
+        from contentpilot.fetchers.router import fetch
+    now = _now(now)
+    intent = (intent or "").strip() or None
+
+    raw = fetch(url.strip())
+    existing = conn.execute(
+        "SELECT s.id, ps.source_id AS triaged FROM sources s LEFT JOIN post_state ps ON ps.source_id = s.id "
+        "WHERE s.canonical_url = ?", (raw.canonical_url,)
+    ).fetchone()
+    if existing and existing["triaged"]:
+        if intent:
+            conn.execute("UPDATE sources SET intent = COALESCE(intent, ?) WHERE id = ?", (intent, existing["id"]))
+        return {"source_id": existing["id"], "new": False, "triage": None, "post": get_post(conn, existing["id"])}
+
+    source_id = save_source(raw)
+    conn.execute("UPDATE sources SET intent = ?, saved_at = COALESCE(saved_at, ?) WHERE id = ?",
+                 (intent, now, source_id))
+    backfill_facts(conn, [source_id])
+    stats = run_triage(conn, llm=llm, now=now, daily_cap_usd=daily_cap_usd, only_ids=[source_id])
+    search.index_source(conn, source_id)
+    return {"source_id": source_id, "new": True, "triage": stats, "post": get_post(conn, source_id)}
+
+
+def notes_path() -> str:
+    return os.path.join(config.DATA_DIR, "notes.md")
+
+
+def save_to_notes(conn, source_id: int, path: str | None = None, now: int | None = None) -> str:
+    """Append the post's title, link and suggested angle to the notes file; record the action."""
+    now = _now(now)
+    path = path or notes_path()
+    post = get_post(conn, source_id)
+    if post is None:
+        raise ValueError(f"no post {source_id}")
+    angle = (post["suggested_action"] or "").strip()
+    if angle.lower().startswith("react:"):
+        angle = angle[len("react:"):].strip()
+    entry = (
+        f"\n## {post['display_title']}\n"
+        f"- Link: {post['canonical_url']}\n"
+        f"- Angle: {angle or '-'}\n"
+        f"- Saved: {datetime.fromtimestamp(now):%Y-%m-%d}\n"
+    )
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(entry)
+    record_action(conn, source_id, "save_notes", destination=os.path.basename(path), now=now)
+    return path

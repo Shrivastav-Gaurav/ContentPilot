@@ -65,3 +65,44 @@ def body_text(text: str | None) -> str:
     marker = "Markdown Content:"
     idx = text.find(marker)
     return text[idx + len(marker):].strip() if idx != -1 else text.strip()
+
+
+# --- titles for display (never written back to sources.title) -----------------
+
+_LINKEDIN_SUFFIX_RE = re.compile(r"\s*\|\s*LinkedIn\s*$", re.IGNORECASE)
+_POSTED_SUFFIX_RE = re.compile(r"\s*\|\s*[^|]+?\s+posted on the topic\s*$", re.IGNORECASE)
+_COMMENTS_SUFFIX_RE = re.compile(r"\s*\|\s*[\d,.]+[kK]?\s+comments?\s*$", re.IGNORECASE)
+_LAST_SEGMENT_RE = re.compile(r"\s*\|\s*([^|]+)$")
+_POST_N_RE = re.compile(r"^POST\s+\d+:?$", re.IGNORECASE)
+_MIN_TITLE_CHARS = 15
+
+
+def clean_title(title: str | None, publisher: str | None = None) -> str:
+    """Strip LinkedIn page-title suffixes: '| <name> | 12 comments', '| LinkedIn',
+    '| <name> posted on the topic', and a trailing '| <publisher>'."""
+    t = (title or "").strip()
+    pub = (publisher or "").strip().lower()
+    while True:
+        before = t
+        t = _LINKEDIN_SUFFIX_RE.sub("", t)
+        t = _POSTED_SUFFIX_RE.sub("", t)
+        if _COMMENTS_SUFFIX_RE.search(t):
+            t = _COMMENTS_SUFFIX_RE.sub("", t)
+            t = _LAST_SEGMENT_RE.sub("", t)  # the "| <name>" that precedes the count
+        if pub and (m := _LAST_SEGMENT_RE.search(t)):
+            seg = m.group(1).strip().lower()
+            if seg and (seg.startswith(pub) or pub.startswith(seg)):
+                t = t[:m.start()]
+        t = t.strip()
+        if t == before:
+            return t
+
+
+def display_title(title: str | None, summary: str | None, publisher: str | None = None) -> str:
+    """Title to show on screen. Falls back to the triage summary when the cleaned
+    title is too short or is a placeholder like 'POST 11:'."""
+    t = clean_title(title, publisher)
+    if len(t) < _MIN_TITLE_CHARS or _POST_N_RE.match(t):
+        if summary and summary.strip():
+            return summary.strip()
+    return t or "Untitled"

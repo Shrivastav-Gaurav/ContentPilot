@@ -5,7 +5,7 @@ Plain SQLite FTS5, no API calls. Status never hides a post from search.
 import json
 import re
 
-from contentpilot.copilot.parsing import body_text, parse_title
+from contentpilot.copilot.parsing import body_text, display_title, parse_title
 
 _TOKEN_RE = re.compile(r"[\w][\w'’-]*", re.UNICODE)
 
@@ -117,4 +117,15 @@ def search(
         + " ORDER BY COALESCE(s.published_at, s.fetched_at) DESC LIMIT ?"
     )
     params.append(limit)
-    return [dict(r) for r in conn.execute(sql, params)]
+    out = []
+    for r in conn.execute(sql, params):
+        d = dict(r)
+        d["display_title"] = display_title(d["title"], d["summary"], d["publisher"])
+        out.append(d)
+    return out
+
+
+def source_types(conn) -> list[str]:
+    """Distinct source types (linkedin, youtube, article...) for the Search filter."""
+    return [r["source_type"] for r in conn.execute(
+        "SELECT DISTINCT source_type FROM sources WHERE source_type IS NOT NULL ORDER BY source_type")]

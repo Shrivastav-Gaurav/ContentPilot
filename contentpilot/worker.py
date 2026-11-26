@@ -245,6 +245,32 @@ def _run_job(job: dict) -> None:
     else:
         _finalize_job(job_id, "done")
 
+    if job_type == "saved_scan":
+        _triage_new_sources()
+
+
+def _triage_new_sources(llm=None) -> dict | None:
+    """After a saved scan: fill facts and triage every post that has no state yet.
+
+    Runs even if the job hit its cap or was cancelled, so whatever was saved
+    reaches the Inbox. Cached posts cost nothing; the daily triage cap applies.
+    """
+    from contentpilot.copilot import service, triage
+
+    conn = get_connection()
+    try:
+        service.backfill_facts(conn)  # only fills what is missing
+        stats = service.run_triage(conn, llm=llm or triage.openrouter_llm)
+        conn.commit()
+        print(f"[worker] triage after saved scan: {stats}")
+        return stats
+    except Exception as exc:  # never take the worker down over triage
+        conn.rollback()
+        print(f"[worker] triage after saved scan failed: {exc}")
+        return None
+    finally:
+        conn.close()
+
 
 def trigger_saved_scan(time_window: str | None = None) -> int:
     """Scrapes LinkedIn saved posts and enqueues them as a saved_scan ingest job.

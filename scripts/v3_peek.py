@@ -8,6 +8,7 @@ Read only.
 import argparse
 import textwrap
 
+from contentpilot.copilot.parsing import display_title
 from contentpilot.db import get_connection
 
 
@@ -45,7 +46,7 @@ def main() -> None:
 
             print(f"\n=== {post_type} ({len(rows)} of {total}) ===")
             for i, r in enumerate(rows, 1):
-                print(f"\n[{i}] {r[1] or '(no title)'}")
+                print(f"\n[{i}] {display_title(r[1], r[2], r[0])}")
                 print(f"    publisher: {r[0] or '(unknown)'}")
                 print(textwrap.fill(f"summary: {r[2] or '-'}", width=100,
                                     initial_indent="    ", subsequent_indent="      "))
