@@ -45,7 +45,7 @@ flowchart LR
 
 | Tool | Purpose | Key file(s) |
 |---|---|---|
-| Streamlit | UI — card library, saved posts, interview prep | `app.py`, `pages/` |
+| Streamlit | UI — home, Inbox, Search, Done log, interview prep | `Home.py`, `pages/` |
 | SQLite (WAL mode) | Source of truth: sources, cards, jobs, flags | `contentpilot/db.py`, `contentpilot/storage.py` |
 | SQLite FTS5 | Lexical search over card summaries/learnings | `contentpilot/db.py` (migration 4) |
 | ChromaDB | Insight-level vector index, cosine distance | `contentpilot/storage.py` |
@@ -70,7 +70,7 @@ cp .env.example .env          # fill in your keys
 python -m contentpilot.worker
 
 # Terminal 2 — the app
-streamlit run app.py
+streamlit run Home.py
 ```
 
 ## Screenshots

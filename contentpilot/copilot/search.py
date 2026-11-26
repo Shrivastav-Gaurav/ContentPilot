@@ -69,13 +69,25 @@ def rebuild_index(conn) -> int:
     return len(ids)
 
 
+_PHRASE_RE = re.compile(r'"([^"]*)"')
+
+
 def _fts_query(text: str) -> str | None:
-    """Turn free text into a safe FTS5 query: every word must match (prefix)."""
-    tokens = _TOKEN_RE.findall(text or "")
-    if not tokens:
-        return None
+    """Turn free text into a safe FTS5 query.
+
+    Text in double quotes is an exact phrase ("neural network"); every other word
+    must match too (prefix match for words of 4+ letters). An unpaired quote is ignored.
+    """
+    text = text or ""
+    parts = []
+    for phrase in _PHRASE_RE.findall(text):
+        words = _TOKEN_RE.findall(phrase)
+        if words:
+            parts.append('"' + " ".join(w.replace('"', "") for w in words) + '"')
     # Prefix match only for words of 4+ letters, so "RAG" does not match "ragged".
-    return " AND ".join('"' + t.replace('"', "") + ('"*' if len(t) >= 4 else '"') for t in tokens)
+    for t in _TOKEN_RE.findall(_PHRASE_RE.sub(" ", text)):
+        parts.append('"' + t.replace('"', "") + ('"*' if len(t) >= 4 else '"'))
+    return " AND ".join(parts) or None
 
 
 def search(

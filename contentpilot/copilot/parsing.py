@@ -77,9 +77,22 @@ _POST_N_RE = re.compile(r"^POST\s+\d+:?$", re.IGNORECASE)
 _MIN_TITLE_CHARS = 15
 
 
+_NAME_WORD_CHARS = set(".,'’-")
+
+
+def _looks_like_name(segment: str) -> bool:
+    """2-4 capitalised words, e.g. 'Amy Cuddy', 'Stan Fedotov, PhD', 'Sunil Pachunde PMP, CSM'.
+    Digits or other punctuation ('Deep Learning Chapter 3', 'Bangalore!') mean it is not a name."""
+    words = segment.split()
+    return 2 <= len(words) <= 4 and all(
+        w[0].isupper() and all(ch.isalpha() or ch in _NAME_WORD_CHARS for ch in w) for w in words
+    )
+
+
 def clean_title(title: str | None, publisher: str | None = None) -> str:
     """Strip LinkedIn page-title suffixes: '| <name> | 12 comments', '| LinkedIn',
-    '| <name> posted on the topic', and a trailing '| <publisher>'."""
+    '| <name> posted on the topic', a trailing '| <publisher>', and finally one
+    trailing '| <name>' that looks like a person's name."""
     t = (title or "").strip()
     pub = (publisher or "").strip().lower()
     while True:
@@ -95,7 +108,11 @@ def clean_title(title: str | None, publisher: str | None = None) -> str:
                 t = t[:m.start()]
         t = t.strip()
         if t == before:
-            return t
+            break
+    # Only once: "X | Product Lead | Jane Doe" must not also lose "Product Lead".
+    if (m := _LAST_SEGMENT_RE.search(t)) and m.start() > 0 and _looks_like_name(m.group(1).strip()):
+        t = t[:m.start()].strip()
+    return t
 
 
 def display_title(title: str | None, summary: str | None, publisher: str | None = None) -> str:

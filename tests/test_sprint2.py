@@ -21,7 +21,22 @@ UTC = timezone.utc
     ("Senior Technical Program Manager, ShipTech | Amrita Chaudhri She/Her", "Amrita Chaudhri She/Her",
      "Senior Technical Program Manager, ShipTech"),
     ("Agents in production: a field guide | LinkedIn", None, "Agents in production: a field guide"),
-    ("Hybrid retrieval beats embeddings | Stan Fedotov, PhD", None, "Hybrid retrieval beats embeddings | Stan Fedotov, PhD"),
+    ("Hybrid retrieval beats embeddings | Stan Fedotov, PhD", None, "Hybrid retrieval beats embeddings"),
+    # Sprint 2.1: the six real titles that still kept a "|" (publisher as stored).
+    ("Your Body Language May Shape Who You Are | Amy Cuddy | TED", "TED", "Your Body Language May Shape Who You Are"),
+    ("AI and GenAI for Managers: What Actually Works on Monday Morning | Sunil Pachunde PMP, CSM", None,
+     "AI and GenAI for Managers: What Actually Works on Monday Morning"),
+    # Not names: a series subtitle with a number, and a one-word location. These keep their "|".
+    ("But what is a neural network? | Deep learning chapter 1", "3Blue1Brown",
+     "But what is a neural network? | Deep learning chapter 1"),
+    ("Backpropagation, intuitively | Deep Learning Chapter 3", "3Blue1Brown",
+     "Backpropagation, intuitively | Deep Learning Chapter 3"),
+    ("Gradient descent, how neural networks learn | Deep Learning Chapter 2", "3Blue1Brown",
+     "Gradient descent, how neural networks learn | Deep Learning Chapter 2"),
+    ("🚀 We’re Hiring | Staff Technical Program Manager – Walmart Global Tech | Bangalore!", "Mahima Sajwan",
+     "🚀 We’re Hiring | Staff Technical Program Manager – Walmart Global Tech | Bangalore!"),
+    # The name rule strips once: the role before the name stays.
+    ("Hiring for our agent platform | Product Lead | Jane Doe", None, "Hiring for our agent platform | Product Lead"),
 ])
 def test_display_title_strips_suffixes(title, publisher, expected):
     from contentpilot.copilot.parsing import display_title
@@ -166,6 +181,21 @@ def test_search_results_have_display_title_and_source_types(conn):
     results = search.search(conn, "Anika Rao")
     assert results[0]["display_title"] == "RAG is no longer simple"
     assert search.source_types(conn) == ["linkedin"]
+
+
+def test_search_quoted_text_is_an_exact_phrase(conn):
+    from contentpilot.copilot import search, service
+    service.backfill_facts(conn)
+    service.run_triage(conn, llm=fake_llm_factory([]), now=NOW)
+    # Post 3 body: "Hybrid retrieval and reranking beat plain embeddings."
+    ids = lambda q: [r["id"] for r in search.search(conn, q)]  # noqa: E731
+    assert ids("reranking retrieval") == [3]                  # all words, any order
+    assert ids('"retrieval and reranking"') == [3]            # exact phrase
+    assert ids('"reranking retrieval"') == []                 # phrase in the wrong order
+    assert ids('"retrieval and" embeddings') == [3]           # phrase plus a plain word
+    assert ids('"retrieval and" Ellison') == []               # ...all must match
+    assert ids('"hybrid retrieval') == [3]                    # unpaired quote: plain words
+    assert ids('""') == ids("")                               # empty phrase is no filter
 
 
 # --- worker: triage after a saved scan --------------------------------------------
