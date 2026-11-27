@@ -17,6 +17,7 @@ ACTION_LABELS = {
     "archive": "Archived",
     "apply_pack_copied": "Apply pack copied",
     "job_status": "Job status set",
+    "keep": "Kept",
 }
 
 STATUS_LABELS = {"open": "Open", "done": "Done", "read": "Read", "parked": "Parked",

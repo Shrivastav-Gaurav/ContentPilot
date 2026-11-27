@@ -134,3 +134,44 @@ the resume `data/*.docx` and a `.env` with only `OPENROUTER_API_KEY`, `OPENROUTE
 sudo -u contentpilot -H bash -c 'cd ~/ContentPilot && venv/bin/python -c "from contentpilot.db import get_connection; from contentpilot.copilot import spend; c=get_connection(); spend.set_daily_cap(c, 0.25); c.commit(); print(spend.get_daily_cap(c))"'
 sudo systemctl start contentpilot-web contentpilot-api contentpilot-worker
 ```
+
+## 8. Daily email, Sunday summary, keep-or-dismiss (Sprint 5)
+
+Built inside the worker (no new service), from the database only: no model call, spend stays $0.
+Times are Asia/Kolkata even though the VM clock is UTC: the daily email goes out from **07:30**, the
+Sunday summary from **18:00 Sunday**. The worker checks every 5 minutes, so a restart or a late start
+still sends that day, and `digest_log` (one row per kind and local day) makes it at most once.
+
+Add these to `/home/contentpilot/ContentPilot/.env` (nano, mode stays 600; the same Gmail account PostPilot uses):
+
+```
+GMAIL_USER=...
+GMAIL_APP_PASSWORD=...
+DIGEST_TO=...
+APP_BASE_URL=https://postpilot-vm.tail7aeda9.ts.net
+```
+
+If any is missing the worker logs one line per day (`digest not sent: missing ...`) and carries on.
+
+```bash
+# print today's email from a copy of the DB; sends nothing (laptop or VM)
+sudo -u contentpilot -H bash -c 'cd ~/ContentPilot && venv/bin/python -m scripts.send_digest --dry-run'
+# send it now (still once per day; add --again to send a second one); --kind weekly for the summary
+sudo -u contentpilot -H bash -c 'cd ~/ContentPilot && venv/bin/python -m scripts.send_digest --send-now'
+sudo journalctl -u contentpilot-worker -b --no-pager | grep -i digest
+```
+
+**What goes in the daily email** (a section is left out when empty; nothing at all is sent if all are empty):
+due today / overdue posts (max 10, most overdue first, grouped by type); the top 3 jobs to apply to (existing
+fit scores, posted in the last 60 days, not applied / deferred / not a fit; nothing is re-scored); and
+"Decide". The Sunday summary has the week's numbers (added, filed/done, archived, dismissed, jobs applied and
+deferred, open by type), the top 3 jobs and "Decide".
+
+**Two ignored reminders.** Each time a post is listed in the *due* section, `post_state.reminders_sent` goes up
+by one; any action you take on it sets it back to 0. At 2 it leaves the due list and shows up under "Decide" in
+the email and in a **Keep or dismiss?** strip at the top of the Inbox. **Keep** resets the counter and moves the
+due date 7 days on (from today if it was overdue); **Dismiss** sets it dismissed (still found by Search).
+Nothing is dismissed automatically. The jobs list is not counted, so a good job can stay in the email.
+
+`data/notes.md` lives on the VM: the Done log has a **Download notes.md** button. "Save to notes file" is
+idempotent (a post already saved is not appended twice).

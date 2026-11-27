@@ -237,6 +237,21 @@ _MIGRATIONS = {
                '{"backfilled": true}', model, cost_usd, COALESCE(extracted_at, 0)
         FROM cards WHERE cost_usd IS NOT NULL;
     """,
+    9: """
+        -- Sprint 5: one row per digest per local (Asia/Kolkata) day. The primary key is the
+        -- once-per-day guard: a restart or a second worker pass cannot send a second email.
+        -- The per-post reminder counter is post_state.reminders_sent (exists since migration 3).
+        CREATE TABLE digest_log (
+            kind TEXT NOT NULL CHECK (kind IN ('daily', 'weekly')),
+            day TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('sending', 'sent', 'failed', 'skipped')),
+            items INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (kind, day)
+        );
+    """,
 }
 
 

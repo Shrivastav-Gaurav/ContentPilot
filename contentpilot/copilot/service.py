@@ -22,7 +22,7 @@ from contentpilot.copilot.parsing import (body_text, display_title, parse_publis
 # What each action does to the post's status. Anything else -> 'done'.
 _ACTION_STATUS = {"read": "read", "park": "parked", "dismiss": "dismissed", "archive": "archived"}
 # Actions that record work but leave the post where it is.
-_NO_STATUS_CHANGE = {"apply_pack_copied", "job_status"}
+_NO_STATUS_CHANGE = {"apply_pack_copied", "job_status", "keep"}
 
 
 @contextmanager
@@ -204,7 +204,46 @@ def record_action(conn, source_id: int, action: str, destination: str | None = N
     if action not in _NO_STATUS_CHANGE:
         conn.execute("UPDATE post_state SET status = ?, updated_at = ? WHERE source_id = ?",
                      (_ACTION_STATUS.get(action, "done"), now, source_id))
+    if not (destination or "").startswith("automatic:"):
+        # Any action by the user answers the reminders: the ignored-reminder counter starts over.
+        conn.execute("UPDATE post_state SET reminders_sent = 0 WHERE source_id = ?", (source_id,))
     search.index_source(conn, source_id)
+
+
+# --- keep or dismiss after ignored reminders ---------------------------------------
+
+IGNORED_REMINDER_LIMIT = 2   # daily emails a post may appear in without any action
+KEEP_PUSH_DAYS = 7
+
+
+def list_decide(conn, now: int | None = None) -> list[dict]:
+    """Open posts that were in the daily email IGNORED_REMINDER_LIMIT times with no action.
+    They leave the email's due list; the user decides: keep_post or dismiss."""
+    now = _now(now)
+    rows = conn.execute(
+        "SELECT ps.source_id, ps.post_type, ps.summary, ps.due_at, ps.reminders_sent, s.title, s.canonical_url, "
+        "s.published_at, s.saved_at, s.fetched_at, a.name AS publisher FROM post_state ps JOIN sources s ON s.id = ps.source_id "
+        "LEFT JOIN authors a ON a.id = s.author_id WHERE ps.status = 'open' AND ps.reminders_sent >= ? "
+        "AND (ps.snoozed_until IS NULL OR ps.snoozed_until <= ?) ORDER BY ps.due_at IS NULL, ps.due_at, ps.source_id",
+        (IGNORED_REMINDER_LIMIT, now),
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["display_title"] = display_title(d["title"], d["summary"], d["publisher"])
+        out.append(d)
+    return out
+
+
+def keep_post(conn, source_id: int, now: int | None = None) -> None:
+    """Keep: counter back to 0 and the due date pushed 7 days (from today if it was overdue)."""
+    now = _now(now)
+    row = conn.execute("SELECT due_at FROM post_state WHERE source_id = ?", (source_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"no post {source_id}")
+    due = max(row["due_at"] or now, now) + KEEP_PUSH_DAYS * rules.DAY
+    conn.execute("UPDATE post_state SET due_at = ?, updated_at = ? WHERE source_id = ?", (due, now, source_id))
+    record_action(conn, source_id, "keep", destination=f"due +{KEEP_PUSH_DAYS} days", now=now)
 
 
 def move_back_to_inbox(conn, source_id: int, now: int | None = None) -> None:
@@ -288,7 +327,7 @@ def list_done(conn, limit: int = 100, action: str | None = None) -> list[dict]:
         "FROM actions ac JOIN sources s ON s.id = ac.source_id "
         "LEFT JOIN post_state ps ON ps.source_id = ac.source_id "
         "LEFT JOIN authors a ON a.id = s.author_id "
-        "WHERE ac.action != 'move_back'"
+        "WHERE ac.action NOT IN ('move_back', 'keep')"
     )
     params: list = []
     if action:
@@ -308,7 +347,7 @@ def list_done(conn, limit: int = 100, action: str | None = None) -> list[dict]:
 def done_action_types(conn) -> list[str]:
     """Distinct action names in the Done log, for the filter."""
     return [r["action"] for r in conn.execute(
-        "SELECT DISTINCT action FROM actions WHERE action != 'move_back' ORDER BY action")]
+        "SELECT DISTINCT action FROM actions WHERE action NOT IN ('move_back', 'keep') ORDER BY action")]
 
 
 def status_counts(conn) -> dict:
@@ -347,7 +386,7 @@ def home_counts(conn, now: int | None = None, tz=None) -> dict:
     ).fetchone()["n"]
     done_week = conn.execute(
         "SELECT COUNT(*) AS n FROM actions WHERE created_at >= ? AND undone_at IS NULL "
-        "AND action NOT IN ('move_back', 'apply_pack_copied', 'job_status') "
+        "AND action NOT IN ('move_back', 'apply_pack_copied', 'job_status', 'keep') "
         "AND COALESCE(destination, '') NOT LIKE 'automatic:%'", (rules.start_of_week(now, tz),)
     ).fetchone()["n"]
     return {"open_by_type": open_by_type, "open_total": sum(open_by_type.values()),
@@ -394,21 +433,42 @@ def notes_path() -> str:
     return os.path.join(config.DATA_DIR, "notes.md")
 
 
+def has_action(conn, source_id: int, action: str) -> bool:
+    """True when this action was recorded for the post and not undone (moved back to the Inbox)."""
+    return conn.execute("SELECT 1 FROM actions WHERE source_id = ? AND action = ? AND undone_at IS NULL LIMIT 1",
+                        (source_id, action)).fetchone() is not None
+
+
+def read_notes(path: str | None = None) -> bytes | None:
+    """The notes file as bytes (for the download button), or None when nothing was saved yet."""
+    path = path or notes_path()
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
 def save_to_notes(conn, source_id: int, path: str | None = None, now: int | None = None) -> str:
-    """Append the post's title, link and suggested angle to the notes file; record the action."""
+    """Append the post's title, link and suggested angle to the notes file; record the action.
+
+    Idempotent: a post already saved (and not moved back to the Inbox since) is not appended again."""
     now = _now(now)
     path = path or notes_path()
+    if has_action(conn, source_id, "save_notes"):
+        return path
     post = get_post(conn, source_id)
     if post is None:
         raise ValueError(f"no post {source_id}")
     angle = (post["suggested_action"] or "").strip()
     if angle.lower().startswith("react:"):
         angle = angle[len("react:"):].strip()
+    nl = chr(10)
     entry = (
-        f"\n## {post['display_title']}\n"
-        f"- Link: {post['canonical_url']}\n"
-        f"- Angle: {angle or '-'}\n"
-        f"- Saved: {datetime.fromtimestamp(now):%Y-%m-%d}\n"
+        f"{nl}## {post['display_title']}{nl}"
+        f"- Link: {post['canonical_url']}{nl}"
+        f"- Angle: {angle or '-'}{nl}"
+        f"- Saved: {datetime.fromtimestamp(now):%Y-%m-%d}{nl}"
     )
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:

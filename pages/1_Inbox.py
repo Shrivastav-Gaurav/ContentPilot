@@ -48,6 +48,24 @@ def do_action(source_id: int, action: str, destination: str | None) -> None:
         _flash("error", f"Could not record that: {exc}")
 
 
+def do_keep(source_id: int) -> None:
+    try:
+        with service.transaction() as conn:
+            service.keep_post(conn, source_id)
+        _flash("success", "Kept. It will come back in a week.")
+    except Exception as exc:
+        _flash("error", f"Could not keep it: {exc}")
+
+
+def do_dismiss_decide(source_id: int) -> None:
+    try:
+        with service.transaction() as conn:
+            service.record_action(conn, source_id, "dismiss")
+        _flash("success", "Dismissed. You can still find it in Search.")
+    except Exception as exc:
+        _flash("error", f"Could not dismiss it: {exc}")
+
+
 def do_change_topic(source_id: int, from_topic_id: int, widget_key: str, topic_ids: dict) -> None:
     try:
         with service.transaction() as conn:
@@ -142,6 +160,22 @@ if st.session_state.flash:
     getattr(st, kind)(text.replace("$", r"\$"))  # "$0.10 … $0.25" would render as LaTeX
     st.session_state.flash = None
 
+# --- Keep or dismiss? (posts that were in the daily email twice with no action) ----------
+
+with service.transaction() as _c:
+    decide_rows = service.list_decide(_c, int(time.time()))
+if decide_rows:
+    with st.container(border=True, key="decide_strip"):
+        st.markdown(f"**Keep or dismiss?** ({len(decide_rows)})")
+        st.caption("These were in your daily email twice with no action. Nothing is dismissed unless you choose it.")
+        for d in decide_rows:
+            sid = d["source_id"]
+            st.markdown(f"{type_badge(d['post_type'])} **{md(d['display_title'])}**")
+            st.caption(f"{md(d['publisher'] or 'Unknown publisher')} · [Open original]({d['canonical_url']})")
+            k1, k2 = st.columns(2)
+            k1.button("Keep (+7 days)", key=f"keep_{sid}", on_click=do_keep, args=(sid,), type="primary", width="stretch")
+            k2.button("Dismiss", key=f"dismiss_decide_{sid}", on_click=do_dismiss_decide, args=(sid,), width="stretch")
+
 # --- List --------------------------------------------------------------------------
 
 FILTERS = {"All": None, "Job": "job", "Learning": "learning", "Post idea": "post_idea", "Tool": "tool"}
@@ -166,6 +200,13 @@ with service.transaction() as conn:
     learning_count = len(service.open_learning_ids(conn, now)) if post_type in (None, "learning") else 0
 
 items = sorted(rows + acted_rows, key=lambda r: (r["due_at"] is None, r["due_at"] or 0))
+focus = st.query_params.get("post")   # link from the daily email: show that one post
+if focus and focus.isdigit():
+    items = [r for r in items if r["source_id"] == int(focus)]
+    st.info("Showing the post from your email." if items else "That post is no longer in the Inbox.")
+    if st.button("Show the whole Inbox"):
+        st.query_params.clear()
+        st.rerun()
 st.caption(f"{len(rows)} open" + (f" · {len(acted_rows)} handled just now" if acted_rows else ""))
 
 if learning_count and st.button(f"File all learning posts ({learning_count})"):

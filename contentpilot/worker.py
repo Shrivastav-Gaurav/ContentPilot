@@ -357,17 +357,41 @@ def run_maintenance() -> dict | None:
         conn.close()
 
 
+DIGEST_CHECK_INTERVAL_SEC = 5 * 60
+
+
+def run_digests() -> None:
+    """Daily email (07:30 Asia/Kolkata) and Sunday summary (18:00). Never crashes the worker."""
+    from contentpilot.copilot import digest, service
+    conn = get_connection()
+    try:
+        try:
+            resume_hash = service.load_resume().hash
+        except Exception:
+            resume_hash = None
+        digest.run_scheduled(conn, resume_hash=resume_hash)
+    except Exception as exc:
+        conn.rollback()
+        print(f"[worker] digest check failed: {type(exc).__name__}: {exc}", flush=True)
+    finally:
+        conn.close()
+
+
 def run_forever() -> None:
     load_dotenv()
     _reset_stuck_items()
     scheduler = _start_scheduler()
     print("ContentPilot worker started. Polling for jobs...", flush=True)
     next_maintenance = 0.0
+    next_digest = 0.0
     try:
         while True:
             if time.time() >= next_maintenance:
                 run_maintenance()
                 next_maintenance = time.time() + MAINTENANCE_INTERVAL_SEC
+            if time.time() >= next_digest:
+                run_digests()
+                next_digest = time.time() + DIGEST_CHECK_INTERVAL_SEC
             job = _next_queued_job()
             if job is None:
                 time.sleep(config.WORKER_POLL_INTERVAL_SEC)

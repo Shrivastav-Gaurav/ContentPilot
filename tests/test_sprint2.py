@@ -141,10 +141,10 @@ def test_save_to_notes_appends_and_is_independent_of_postpilot(conn, tmp_path):
     service.save_to_notes(conn, 6, path=str(notes), now=NOW + 1)
     service.save_to_notes(conn, 6, path=str(notes), now=NOW + 2)
     text = notes.read_text(encoding="utf-8")
-    assert text.count("## Strong opinion on agents") == 2
+    assert text.count("## Strong opinion on agents") == 1   # the second save is a no-op (idempotent)
     assert "- Link: https://li/6" in text and "- Angle: a" in text
     actions = [d["action"] for d in service.list_done(conn) if d["source_id"] == 6]
-    assert actions == ["save_notes", "save_notes", "send_postpilot"]
+    assert actions == ["save_notes", "send_postpilot"]
 
 
 def test_done_log_filters_and_automatic_flag(conn):

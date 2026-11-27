@@ -14,6 +14,11 @@ st.title("Done log")
 
 st.session_state.setdefault("done_flash", None)
 
+_notes = service.read_notes()
+if _notes:
+    st.download_button("Download notes.md", _notes, file_name="notes.md", mime="text/markdown",
+                       help="The notes file lives on the server; this saves a copy to your device.")
+
 
 def do_move_back(source_id: int, title: str) -> None:
     try:
