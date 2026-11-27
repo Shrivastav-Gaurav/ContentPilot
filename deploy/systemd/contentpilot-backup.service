@@ -7,4 +7,6 @@ User=@USER@
 WorkingDirectory=@REPO@
 ExecStart=@REPO@/venv/bin/python -m scripts.backup_db --dest @HOME@/contentpilot-backups --keep-days 7
 MemoryMax=150M
+NoNewPrivileges=true
+PrivateTmp=true
 Nice=10

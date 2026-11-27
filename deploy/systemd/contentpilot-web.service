@@ -10,13 +10,16 @@ EnvironmentFile=@REPO@/deploy/contentpilot.env
 # Port, base path etc. come from STREAMLIT_* variables in deploy/contentpilot.env.
 # The address is fixed here on purpose: only tailscale serve (on this machine) can reach it.
 ExecStart=@REPO@/venv/bin/streamlit run Home.py --server.address 127.0.0.1
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=10
 # Never starve PostPilot: soft limit, hard limit, and be the first thing the OOM killer picks.
 MemoryHigh=280M
 MemoryMax=380M
 MemorySwapMax=256M
 OOMScoreAdjust=500
+# Same hardening as postpilot*.service
+NoNewPrivileges=true
+PrivateTmp=true
 Nice=5
 
 [Install]

@@ -1,173 +1,136 @@
 # ContentPilot on the VM
 
-ContentPilot runs on the Google Cloud VM (e2-micro, 1 GB RAM) next to PostPilot and is reached
-only over Tailscale. **The VM's database is the only database.** The laptop runs one job: the
+ContentPilot runs on `postpilot-vm` (e2-micro, Debian 13) next to PostPilot and is reached only over
+Tailscale. **The VM's database is the only ContentPilot database.** The laptop runs one job, the
 LinkedIn saved-posts scan (it needs your logged-in browser), which pushes URLs to the VM.
 
+It copies PostPilot's setup: a dedicated app user owns a git clone in its home folder, systemd runs
+it (`Restart=always`, `RestartSec=10`, `NoNewPrivileges`, `PrivateTmp`), updates are `git pull` +
+restart, logs are in journald. Shared VM setup (the 1 GB swap file, Tailscale, unattended-upgrades,
+the `postpilot` services) is PostPilot's and is not repeated or changed here; see PostPilot's README.
+
 ```
-Android phone ── Share ──▶ https://<vm>.<tailnet>.ts.net/share ─┐
-Tablet / laptop browser ─▶ https://<vm>.<tailnet>.ts.net/       ├─ tailscale serve (HTTPS, tailnet only)
-Laptop scan (every 6 h) ─▶ https://<vm>.<tailnet>.ts.net/api/ingest ┘
-                                   │
-               ┌───────────────────┴────────────────────┐
-      contentpilot-web (Streamlit 127.0.0.1:8502)   contentpilot-api (uvicorn 127.0.0.1:8601)
-                       contentpilot-worker (triage/embedding sweep, daily rules)
-                                   │
-                    data/contentpilot.sqlite3  ──nightly──▶ ~/contentpilot-backups (7 days)
+Android phone ── Share ──▶ https://postpilot-vm.tail7aeda9.ts.net/share ──┐
+Tablet / laptop browser ─▶ https://postpilot-vm.tail7aeda9.ts.net/        ├ tailscale serve :443 (tailnet only)
+Laptop scan (every 6 h) ─▶ https://postpilot-vm.tail7aeda9.ts.net/api/ingest ┘
+     /            -> contentpilot-web    Streamlit  127.0.0.1:8502
+     /api /share /manifest.json /sw.js /pwa -> contentpilot-api  uvicorn  127.0.0.1:8601
+                     contentpilot-worker (triage + embedding sweep, daily rules)
+     data/contentpilot.sqlite3 ── nightly 03:30 ──▶ /home/contentpilot/contentpilot-backups (7 days)
+
+PostPilot (unchanged): postpilot + postpilot-web, http://100.78.225.111:4000
 ```
 
-Nothing listens on a public interface: both servers bind to 127.0.0.1, `tailscale serve` (not
-`funnel`) publishes them to your tailnet only, and no firewall ports are opened.
+Both ContentPilot servers bind to 127.0.0.1. `tailscale serve` (never `funnel`) publishes them to the
+tailnet only; no firewall ports are opened. Ports live in `deploy/contentpilot.env`
+(`STREAMLIT_SERVER_PORT=8502`, `CP_API_PORT=8601`) and must match the serve commands below
+(`tests/test_deploy_config.py` checks this).
 
-Placeholders below: `<vm>` = the VM's Tailscale name (`postpilot-vm`), `<tailnet>` = your tailnet
-name (from `tailscale status --json | grep MagicDNSSuffix`), `~/ContentPilot` = the repo on the VM.
-
----
-
-## 1. First deploy
+## 1. First deploy (admin account with sudo)
 
 ```bash
-# on the VM
-sudo apt-get update && sudo apt-get install -y python3-venv git
-git clone https://github.com/Shrivastav-Gaurav/ContentPilot.git ~/ContentPilot
-cd ~/ContentPilot
-bash deploy/install.sh --no-start        # venv + requirements-vm.txt + systemd units (not started yet)
+sudo apt-get install -y python3-venv sqlite3
+sudo useradd -m -s /bin/bash contentpilot
+sudo -u contentpilot git clone https://github.com/Shrivastav-Gaurav/ContentPilot.git /home/contentpilot/ContentPilot
+sudo bash /home/contentpilot/ContentPilot/deploy/install.sh --no-start   # venv, requirements-vm.txt, units
 ```
 
-`requirements-vm.txt` leaves out chromadb, sentence-transformers and playwright. Search runs on
-stored embeddings + SQLite FTS (`CONTENTPILOT_SEARCH=hybrid`, set in `deploy/contentpilot.env`).
+`requirements-vm.txt` has no chromadb, sentence-transformers or playwright. Search on the VM is stored
+embeddings + SQLite FTS (`CONTENTPILOT_SEARCH=hybrid` in `deploy/contentpilot.env`).
 
-### Swap (only if `free -m` shows under 300 MB available with PostPilot running)
-
-```bash
-sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
-echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swappiness.conf && sudo sysctl -p /etc/sysctl.d/99-swappiness.conf
-```
-
-### Move the data from the laptop (one time)
-
-On the laptop (PowerShell, in the repo, with the local app stopped), send the files with Taildrop
-(works between your own tailnet devices; no SSH needed):
-
-```powershell
-& "C:\Program Files\Tailscale\tailscale.exe" file cp data\contentpilot.sqlite3 data\notes.md (Get-Item data\*.docx) .env.vm postpilot-vm:
-```
-
-Then on the VM, receive them into the repo and put the `.env` in place:
-
-```bash
-cd ~/ContentPilot && sudo tailscale file get --conflict=overwrite data/ && sudo chown $(id -un): data/* \
-  && mv data/.env.vm .env && chmod 600 .env && ls -la data .env
-```
-
-The VM's `.env` needs: `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `SYNTHESIS_MODEL`,
-`OPENAI_API_KEY`, `INGEST_TOKEN` (long random, e.g. `python -c "import secrets; print(secrets.token_urlsafe(48))"`).
-Then on the VM:
-
-```bash
-cd ~/ContentPilot && chmod 600 .env
-venv/bin/python -c "from contentpilot.db import get_connection; from contentpilot.copilot import spend; c=get_connection(); spend.set_daily_cap(c, 0.25); c.commit(); print('cap', spend.get_daily_cap(c))"
-sudo systemctl start contentpilot-web contentpilot-api contentpilot-worker
-curl -s http://127.0.0.1:8601/api/health
-```
+Swap: PostPilot's setup already added a 1 GB `/swapfile`; ContentPilot adds none.
 
 ## 2. Private HTTPS with `tailscale serve`
 
-HTTPS certificates must be on for the tailnet (admin console → DNS → enable MagicDNS and HTTPS).
-Check first what PostPilot already serves: `tailscale serve status`.
-
-**A. Port 443 is free** (PostPilot not on tailscale serve, or on another port):
+Requires HTTPS certificates on for the tailnet (admin console → DNS → HTTPS Certificates).
+PostPilot does not use `tailscale serve` (it is plain HTTP on :4000), so ContentPilot takes :443:
 
 ```bash
 sudo tailscale serve --bg --https=443 http://127.0.0.1:8502
-for p in /api /share /manifest.json /sw.js /pwa; do
-  sudo tailscale serve --bg --https=443 --set-path=$p http://127.0.0.1:8601$p
-done
+sudo tailscale serve --bg --https=443 --set-path=/api http://127.0.0.1:8601/api
+sudo tailscale serve --bg --https=443 --set-path=/share http://127.0.0.1:8601/share
+sudo tailscale serve --bg --https=443 --set-path=/manifest.json http://127.0.0.1:8601/manifest.json
+sudo tailscale serve --bg --https=443 --set-path=/sw.js http://127.0.0.1:8601/sw.js
+sudo tailscale serve --bg --https=443 --set-path=/pwa http://127.0.0.1:8601/pwa
 tailscale serve status
 ```
 
-ContentPilot: `https://<vm>.<tailnet>.ts.net/` (Inbox at `/Inbox`, share page at `/share`).
-
-**B. PostPilot already owns `/` on 443:** give ContentPilot its own HTTPS port (8443), so
-nothing of PostPilot changes:
-
-```bash
-sudo tailscale serve --bg --https=8443 http://127.0.0.1:8502
-for p in /api /share /manifest.json /sw.js /pwa; do
-  sudo tailscale serve --bg --https=8443 --set-path=$p http://127.0.0.1:8601$p
-done
-```
-
-ContentPilot: `https://<vm>.<tailnet>.ts.net:8443/`. (The share target and "Open Inbox" use
-relative links, so they work on either port.)
-
-`tailscale serve --bg` settings persist across reboots. Undo ContentPilot's part only with
-`sudo tailscale serve --https=<port> --set-path=<path> off` per path.
+Settings persist across reboots. Remove ContentPilot's serving entirely with
+`sudo tailscale serve --https=443 off` (PostPilot is unaffected either way).
 
 ## 3. Everyday commands
 
-| What | Command (on the VM) |
+| What | Command (on the VM, admin account) |
 | --- | --- |
 | Status | `systemctl status contentpilot-web contentpilot-api contentpilot-worker` |
-| Logs (follow) | `journalctl -u contentpilot-api -u contentpilot-worker -u contentpilot-web -f` |
-| Logs since boot, one unit | `journalctl -u contentpilot-worker -b --no-pager` |
+| Logs (follow) | `sudo journalctl -u contentpilot-web -u contentpilot-api -u contentpilot-worker -f` |
+| Logs, one unit, this boot | `sudo journalctl -u contentpilot-worker -b --no-pager` |
 | Restart | `sudo systemctl restart contentpilot-web contentpilot-api contentpilot-worker` |
-| Update after `git pull` | `cd ~/ContentPilot && git pull && bash deploy/install.sh` |
+| Update after a push | `sudo -u contentpilot git -C /home/contentpilot/ContentPilot pull && sudo bash /home/contentpilot/ContentPilot/deploy/install.sh` |
 | Health | `curl -s http://127.0.0.1:8601/api/health` |
-| Memory per service | `systemctl status contentpilot-web contentpilot-api contentpilot-worker \| grep -E "●\|Memory"` and `free -m` |
-| Spend today / all time | `cd ~/ContentPilot && venv/bin/python -m scripts.v3_spend` |
-| Backup now | `sudo systemctl start contentpilot-backup && ls -lh ~/contentpilot-backups` |
+| Memory | `free -m; systemctl status contentpilot-web contentpilot-api contentpilot-worker postpilot postpilot-web \| grep -E "●\|Memory"` |
+| Spend today / all time | `sudo -u contentpilot -H bash -c 'cd ~/ContentPilot && venv/bin/python -m scripts.v3_spend'` |
+| Backup now | `sudo systemctl start contentpilot-backup && sudo ls -lh /home/contentpilot/contentpilot-backups` |
 | Next backup | `systemctl list-timers contentpilot-backup.timer` |
 
-Memory: each unit has `MemoryHigh`/`MemoryMax` (web 280/380 MB, api and worker 150/220 MB) and
-`OOMScoreAdjust=500`, so under pressure the kernel throttles or kills ContentPilot, never PostPilot.
+Memory: each ContentPilot unit has `MemoryHigh`/`MemoryMax` (web 280/380 MB, api and worker 150/220 MB)
+and `OOMScoreAdjust=500`, so under pressure the kernel throttles or kills ContentPilot, not PostPilot.
 
 ### Restore a backup (one line)
 
 ```bash
-sudo systemctl stop contentpilot-web contentpilot-api contentpilot-worker && cp ~/contentpilot-backups/contentpilot-YYYYMMDD-HHMMSS.sqlite3 ~/ContentPilot/data/contentpilot.sqlite3 && rm -f ~/ContentPilot/data/contentpilot.sqlite3-wal ~/ContentPilot/data/contentpilot.sqlite3-shm && sudo systemctl start contentpilot-web contentpilot-api contentpilot-worker
+sudo systemctl stop contentpilot-web contentpilot-api contentpilot-worker && sudo -u contentpilot cp /home/contentpilot/contentpilot-backups/contentpilot-YYYYMMDD-HHMMSS.sqlite3 /home/contentpilot/ContentPilot/data/contentpilot.sqlite3 && sudo rm -f /home/contentpilot/ContentPilot/data/contentpilot.sqlite3-wal /home/contentpilot/ContentPilot/data/contentpilot.sqlite3-shm && sudo systemctl start contentpilot-web contentpilot-api contentpilot-worker
 ```
 
-(`ls ~/contentpilot-backups` to pick the file. Backups are made with SQLite's online backup API,
-the same as `sqlite3 .backup`, and checked with `PRAGMA integrity_check`.)
+Pick the file with `sudo ls /home/contentpilot/contentpilot-backups`. Backups use SQLite's online
+backup API (same as `sqlite3 .backup`) and are checked with `PRAGMA integrity_check`.
 
 ## 4. The API
 
 ```bash
-# health (no token)
-curl -s https://<vm>.<tailnet>.ts.net/api/health
-# add posts (token required; wrong or missing token -> 401)
-curl -s -X POST https://<vm>.<tailnet>.ts.net/api/ingest -H "X-Ingest-Token: $INGEST_TOKEN" \
-     -H "Content-Type: application/json" -d '{"urls": ["https://www.linkedin.com/posts/..."], "intent": "optional"}'
+curl -s https://postpilot-vm.tail7aeda9.ts.net/api/health                          # no token
+curl -s -X POST https://postpilot-vm.tail7aeda9.ts.net/api/ingest \
+     -H "X-Ingest-Token: $INGEST_TOKEN" -H "Content-Type: application/json" \
+     -d '{"urls": ["https://www.linkedin.com/posts/..."], "intent": "optional"}'
 ```
 
-Each URL comes back `added`, `duplicate` (already saved; nothing fetched), `blocked` (login wall)
-or `failed`. Up to 50 URLs per call; new posts are triaged together and embedded.
+Missing or wrong token: 401. Each URL comes back `added`, `duplicate` (already saved, not fetched
+again), `blocked` (login wall) or `failed`. Up to 50 URLs per call.
 
-## 5. Install the app on Android (share target)
+## 5. Install on Android (share target)
 
-1. Phone: install Tailscale, sign in to the same tailnet, keep it connected.
-2. Chrome on the phone: open `https://<vm>.<tailnet>.ts.net/share` (add `:8443` for option B).
-3. Chrome menu ⋮ → **Install app** (or **Add to Home screen** → Install). Open it once.
-4. In LinkedIn: on a post tap **Share → … (more) → ContentPilot**. The page shows the link;
-   optionally type what you want from it, tap **Add**, then **Added - open Inbox**.
+1. Phone: Tailscale app installed, signed in to this tailnet, connected.
+2. Chrome on the phone: open `https://postpilot-vm.tail7aeda9.ts.net/share`.
+3. Chrome menu ⋮ → **Install app** (or **Add to Home screen** → **Install**). Open it once.
+4. LinkedIn app: on a post, **Share** → **ContentPilot** (under "More" the first time). The page
+   shows the link; optionally say what you want from it; tap **Add**, then **Added - open Inbox**.
 
-If ContentPilot is missing from the Share menu: open the installed app once, then reboot Chrome
-(Android refreshes share targets lazily). `chrome://webapks` lists installed web apps.
+If ContentPilot isn't in the Share menu yet: open the installed app once, then fully close and reopen
+Chrome; Android registers share targets when the web app is installed (`chrome://webapks` lists it).
 
 ## 6. The laptop: scan and push
 
-The laptop keeps only the LinkedIn scan. In the laptop `.env`:
-`CONTENTPILOT_VM_URL=https://<vm>.<tailnet>.ts.net` (plus `:8443` for option B) and the same
+Laptop `.env`: `CONTENTPILOT_VM_URL=https://postpilot-vm.tail7aeda9.ts.net` and the same
 `INGEST_TOKEN` as the VM.
 
 ```powershell
-venv\Scripts\python -m scripts.scan_and_push --dry-run     # scan only, prints URLs
-venv\Scripts\python -m scripts.scan_and_push               # scan + push to the VM
+venv\Scripts\python -m scripts.scan_and_push --dry-run        # scan only, prints URLs
+venv\Scripts\python -m scripts.scan_and_push                  # scan + push to the VM
 powershell -ExecutionPolicy Bypass -File deploy\windows\register-scan-task.ps1   # at logon + every 6 h
 Get-Content data\scan_and_push.log -Tail 20
 ```
 
-`scan_and_push` cannot open a database (sqlite3 is disabled in that process). After the move the
-laptop's database is renamed to `data/contentpilot.sqlite3.moved-to-vm`, so nothing writes to it.
+`scan_and_push` cannot open a database (sqlite3 is disabled in that process). The laptop's old
+database is renamed `data/contentpilot.sqlite3.moved-to-vm` so nothing writes to it.
+
+## 7. One-time data move (done once, kept for reference)
+
+Laptop: stop the local app, back up `data/contentpilot.sqlite3`, then copy the DB, `data/notes.md`,
+the resume `data/*.docx` and a `.env` with only `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`,
+`SYNTHESIS_MODEL`, `OPENAI_API_KEY`, `INGEST_TOKEN` to `/home/contentpilot/ContentPilot/` (owned by
+`contentpilot`, `.env` mode 600). Then set the cap and start:
+
+```bash
+sudo -u contentpilot -H bash -c 'cd ~/ContentPilot && venv/bin/python -c "from contentpilot.db import get_connection; from contentpilot.copilot import spend; c=get_connection(); spend.set_daily_cap(c, 0.25); c.commit(); print(spend.get_daily_cap(c))"'
+sudo systemctl start contentpilot-web contentpilot-api contentpilot-worker
+```

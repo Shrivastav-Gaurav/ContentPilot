@@ -8,12 +8,15 @@ User=@USER@
 WorkingDirectory=@REPO@
 EnvironmentFile=@REPO@/deploy/contentpilot.env
 ExecStart=@REPO@/venv/bin/python -m contentpilot.worker
-Restart=on-failure
+Restart=always
 RestartSec=10
 MemoryHigh=150M
 MemoryMax=220M
 MemorySwapMax=128M
 OOMScoreAdjust=500
+# Same hardening as postpilot*.service
+NoNewPrivileges=true
+PrivateTmp=true
 Nice=10
 
 [Install]
