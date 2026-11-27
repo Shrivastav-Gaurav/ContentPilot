@@ -328,3 +328,57 @@ def test_dry_run_script_reads_a_copy_and_writes_nothing(tmp_path, monkeypatch, c
     assert open(live, "rb").read() == before or sqlite3.connect(live).execute(
         "SELECT COUNT(*) FROM digest_log").fetchone()[0] == 0
     db._DB_PATH = live
+
+
+# --- hand-off: PostPilot link, idempotent, independent of notes --------------------------------------
+
+def test_send_to_postpilot_is_idempotent_encoded_and_independent_of_notes(conn, tmp_path):
+    from urllib.parse import parse_qs, urlparse
+    add_post(conn, 1, "post_idea", due=FRI + DAY, title="Why TPMs should treat AI as a thinking partner & more")
+    conn.execute("UPDATE post_state SET suggested_action = 'React: contrarian take, with data' WHERE source_id = 1")
+    first = service.send_to_postpilot(conn, 1, now=FRI)
+    again = service.send_to_postpilot(conn, 1, now=FRI + 5)
+    assert first["already_sent"] is False and again["already_sent"] is True
+    assert [a["action"] for a in service.list_done(conn)].count("send_postpilot") == 1
+    u = urlparse(first["url"])
+    assert (u.scheme, u.netloc, u.path) == ("http", "100.78.225.111:4000", "/")
+    q = parse_qs(u.query)
+    assert q["tab"] == ["approvals"]
+    assert q["idea"][0].startswith("Why TPMs should treat AI as a thinking partner & more. Angle: contrarian take, with data")
+    assert "&more" not in first["url"]                                  # the & is encoded, not a new parameter
+    # both on the same post, each recorded once
+    service.save_to_notes(conn, 1, path=str(tmp_path / "notes.md"), now=FRI + 10)
+    service.save_to_notes(conn, 1, path=str(tmp_path / "notes.md"), now=FRI + 11)
+    acts = [a["action"] for a in service.list_done(conn) if a["source_id"] == 1]
+    assert sorted(acts) == ["save_notes", "send_postpilot"]
+
+
+def test_postpilot_idea_is_cut_with_a_flag_when_too_long(conn):
+    add_post(conn, 1, "post_idea", due=FRI + DAY, title="T" * 40)
+    conn.execute("UPDATE post_state SET suggested_action = ? WHERE source_id = 1", ("angle " * 200,))
+    idea, cut = service.postpilot_idea(conn, 1)
+    assert cut and len(idea) <= service.POSTPILOT_IDEA_MAX and idea.endswith("…")
+    url, flag = service.postpilot_link(conn, 1)
+    assert flag and url.endswith("&cut=1") and len(url) < 2200
+    res = service.send_to_postpilot(conn, 1, now=FRI)
+    assert res["shortened"] is True
+    add_post(conn, 2, "post_idea", due=FRI + DAY, title="A short idea about something")
+    assert service.postpilot_idea(conn, 2)[1] is False
+
+
+def test_postpilot_url_setting(conn, monkeypatch):
+    add_post(conn, 1, "post_idea", due=FRI + DAY)
+    monkeypatch.setenv("POSTPILOT_UI_URL", "http://pp.example:4000/")
+    assert service.postpilot_link(conn, 1)[0].startswith("http://pp.example:4000/?tab=approvals&idea=")
+
+
+def test_sprint5_test_post_script_creates_and_removes(conn):
+    from scripts import v3_sprint5_test_post as t
+    sid = t.create(conn)
+    t.create(conn)                                           # re-running resets it, never duplicates
+    assert [r["source_id"] for r in service.list_decide(conn, FRI + 400 * DAY)] == [sid]
+    service.keep_post(conn, sid, now=FRI)
+    t.create(conn)                                           # back to 2 reminders for another try
+    assert len(service.list_decide(conn, FRI)) == 1
+    assert t.remove(conn) and not t.remove(conn)
+    assert conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0] == 0

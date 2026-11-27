@@ -38,12 +38,24 @@ def do_action(source_id: int, action: str, destination: str | None) -> None:
     try:
         with service.transaction() as conn:
             if action == "save_notes":
-                service.save_to_notes(conn, source_id)
+                if service.has_action(conn, source_id, "save_notes"):
+                    _flash("info", "Already saved to the notes file.")
+                else:
+                    service.save_to_notes(conn, source_id)
+            elif action == "send_postpilot":
+                res = service.send_to_postpilot(conn, source_id)
+                if res["already_sent"]:
+                    _flash("info", "Already sent to PostPilot. Use Open PostPilot to see it there.")
+                elif res["shortened"]:
+                    _flash("warning", f"Sent to PostPilot. The idea was shortened to {service.POSTPILOT_IDEA_MAX} "
+                                      "characters to fit the link.")
             elif action == "file_to_prep":
                 service.file_to_prep(conn, source_id)  # one cached Haiku call
             else:
                 service.record_action(conn, source_id, action, destination=destination)
-        st.session_state.acted.setdefault(source_id, []).append(action)
+        done_here = st.session_state.acted.setdefault(source_id, [])
+        if action not in done_here:
+            done_here.append(action)
     except Exception as exc:
         _flash("error", f"Could not record that: {exc}")
 
@@ -235,6 +247,10 @@ def render_row(r: dict) -> None:
             labels = [f"Filed in Prep: {', '.join(t['name'] for t in topics)}" if a == "file_to_prep" and topics
                       else action_label(a) for a in done]
             st.success(" · ".join(labels))
+            if "send_postpilot" in done:
+                with service.transaction() as _c:
+                    pp_url, _ = service.postpilot_link(_c, sid)
+                st.link_button("Open PostPilot ↗", pp_url, width="stretch")   # new tab; the idea is pre-filled
             for t in topics or []:
                 key = f"{sid}_topic_{t['id']}"
                 st.selectbox("Change topic", list(all_topics), index=list(all_topics).index(t["name"]), key=key,

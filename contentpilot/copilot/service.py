@@ -433,6 +433,44 @@ def notes_path() -> str:
     return os.path.join(config.DATA_DIR, "notes.md")
 
 
+POSTPILOT_IDEA_MAX = 500   # characters carried in the link (PostPilot caps again on its side at 600)
+
+
+def postpilot_idea(conn, source_id: int) -> tuple[str, bool]:
+    """(idea text, was_shortened): the post's title plus the suggested angle, cut to POSTPILOT_IDEA_MAX."""
+    post = get_post(conn, source_id)
+    if post is None:
+        raise ValueError(f"no post {source_id}")
+    angle = (post["suggested_action"] or "").strip()
+    if angle.lower().startswith("react:"):
+        angle = angle[len("react:"):].strip()
+    text = post["display_title"].strip().rstrip(".")
+    if angle:
+        text += f". Angle: {angle}"
+    if len(text) <= POSTPILOT_IDEA_MAX:
+        return text, False
+    return text[:POSTPILOT_IDEA_MAX - 1].rstrip() + "…", True
+
+
+def postpilot_link(conn, source_id: int) -> tuple[str, bool]:
+    """(PostPilot URL that pre-fills 'What to post about?', was_shortened). The text is URL-encoded."""
+    from urllib.parse import quote
+    idea, cut = postpilot_idea(conn, source_id)
+    return f"{config.postpilot_ui_url()}/?tab=approvals&idea={quote(idea, safe='')}" + ("&cut=1" if cut else ""), cut
+
+
+def send_to_postpilot(conn, source_id: int, now: int | None = None) -> dict:
+    """Hand a post idea to PostPilot: record 'send_postpilot' once and return the link to open.
+
+    Idempotent: a second call records nothing and reports already_sent. Independent of save_to_notes.
+    Nothing is sent over the network; PostPilot receives the text only when you open the link."""
+    url, cut = postpilot_link(conn, source_id)
+    already = has_action(conn, source_id, "send_postpilot")
+    if not already:
+        record_action(conn, source_id, "send_postpilot", destination="PostPilot", now=_now(now))
+    return {"url": url, "shortened": cut, "already_sent": already}
+
+
 def has_action(conn, source_id: int, action: str) -> bool:
     """True when this action was recorded for the post and not undone (moved back to the Inbox)."""
     return conn.execute("SELECT 1 FROM actions WHERE source_id = ? AND action = ? AND undone_at IS NULL LIMIT 1",

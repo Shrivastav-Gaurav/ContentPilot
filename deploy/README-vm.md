@@ -175,3 +175,16 @@ Nothing is dismissed automatically. The jobs list is not counted, so a good job 
 
 `data/notes.md` lives on the VM: the Done log has a **Download notes.md** button. "Save to notes file" is
 idempotent (a post already saved is not appended twice).
+
+**PostPilot hand-off (post ideas).** "Send to PostPilot" records the hand-off once (a second click says
+already sent), then **Open PostPilot** opens `http://100.78.225.111:4000/?tab=approvals&idea=<text>` in a new
+tab. PostPilot pre-fills "What to post about?" and does nothing until you press Generate; the text is the post's
+title plus its suggested angle, URL-encoded and cut to 500 characters (PostPilot caps at 600) with a visible note
+when shortened. It needs the one-line `server/public/app.js` change in the PostPilot repo (branch
+`contentpilot-idea-prefill`) to be live; it is a static file, so no restart. Change the address with
+`POSTPILOT_UI_URL` in `.env`. "Save to notes file" is separate: both can be done on one post, each is recorded
+once.
+
+**Try Keep / Dismiss on the phone.** After a database backup, `python -m scripts.v3_sprint5_test_post --create`
+makes one throw-away post at 2 ignored reminders (re-run it to reset it); `--remove` deletes it.
+

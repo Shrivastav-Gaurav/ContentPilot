@@ -63,6 +63,11 @@ def openai_api_key() -> str | None:
     return (os.environ.get("OPENAI_API_KEY") or "").strip() or None
 
 
+def postpilot_ui_url() -> str:
+    """Where your browser reaches PostPilot's web UI (the tailnet address, not the VM's localhost)."""
+    return (os.environ.get("POSTPILOT_UI_URL") or "http://100.78.225.111:4000").rstrip("/")
+
+
 def ingest_token() -> str | None:
     """Shared secret for POST /api/ingest (header X-Ingest-Token). Unset -> ingest is refused."""
     return (os.environ.get("INGEST_TOKEN") or "").strip() or None
